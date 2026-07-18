@@ -1,0 +1,8 @@
+﻿
+# cdh-sortswift
+node_modules/
+frontend/dist/
+# sortswift.db is intentionally tracked (via Git LFS) to sync data across machines.
+# Only the transient SQLite WAL/SHM sidecar files stay ignored.
+*.db-wal
+*.db-shm

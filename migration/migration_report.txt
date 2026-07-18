@@ -1,0 +1,17 @@
+Airtable -> cdh-sortswift migration report
+==================================================
+On-hand inventory records read: 301
+CSV rows written (FIFO batches): 304  (347 units)
+Rows with a confident catalog match: 302
+Flagged best-guess matches: 1
+Cost outliers (likely source typos): 1
+Unmatched (no catalog hit): 1
+
+--- COST OUTLIERS (fix cost in staging before approving) ---
+Drossforge Bridge (MH2): cost $9460.50 vs market $1.00
+
+--- FLAGGED best-guess matches (verify in staging) ---
+Entei #244: 'Neo Premium File 2' -> 'Neo Revelation' (score 0.20)
+
+--- UNMATCHED (hand-add or fix source) ---
+Eye of Timaeus | Ghosts From the Past: The 2nd Haunting #GFP2-EN183 | yugioh
