@@ -1,15 +1,20 @@
 import React, { useEffect, useMemo, useState } from 'react'
-import { api, download, scanImageUrl } from '../api.js'
+import { api, download, fmtMoney, scanImageUrl } from '../api.js'
 import { CardSearch, Field, Modal, Msg, useMeta, useMsg } from '../components.jsx'
 
 const SORTS = {
   scan: (a, b) => a.seq - b.seq,
+  value: (a, b) => (b.market_value || 0) - (a.market_value || 0),  // high value first (for sifting)
   name: (a, b) => (a.card?.name || '').localeCompare(b.card?.name || ''),
   file: (a, b) => a.file_name.localeCompare(b.file_name),
   confidence: (a, b) => a.confidence - b.confidence,
   collector: (a, b) => (a.card?.collector_number || '').localeCompare(b.card?.collector_number || '', undefined, { numeric: true }),
   rarity: (a, b) => (a.card?.rarity || '').localeCompare(b.card?.rarity || ''),
 }
+
+// Cards at/above this market value are worth pulling out of a bulk batch — shown
+// bold-green so they pop while sifting; below it the price is muted.
+const NOTABLE_VALUE = 2
 
 export default function ScanPage() {
   const meta = useMeta()
@@ -179,12 +184,18 @@ export default function ScanPage() {
           <div className="row center">
             <h3 style={{ margin: 0 }}>Review queue — pull #{activePull}</h3>
             <Field label="Sort"><select value={sortKey} onChange={(e) => setSortKey(e.target.value)}>
-              <option value="scan">scan order</option><option value="name">card name</option>
+              <option value="scan">scan order</option><option value="value">market value (high→low)</option>
+              <option value="name">card name</option>
               <option value="file">file name</option><option value="confidence">confidence</option>
               <option value="collector">collector #</option><option value="rarity">rarity</option>
             </select></Field>
             <label><input type="checkbox" checked={flaggedOnly}
               onChange={(e) => setFlaggedOnly(e.target.checked)} /> flagged only</label>
+            <span style={{ flex: 1 }} />
+            <span className="muted" title="Sum of each card's market value × quantity across the rows shown">
+              {shown.length} shown · est. value <b style={{ color: 'var(--green)' }}>
+                {fmtMoney(shown.reduce((s, i) => s + (i.market_value || 0) * i.quantity, 0))}</b>
+            </span>
           </div>
 
           <div className="row center">
@@ -213,7 +224,7 @@ export default function ScanPage() {
           <div className="table-wrap"><table>
             <thead><tr>
               <th><input type="checkbox" checked={selected.size === shown.length && shown.length > 0} onChange={toggleAll} /></th>
-              <th>Scan</th><th>Match</th><th>Confidence</th><th>Cond</th><th>Printing</th>
+              <th>Scan</th><th>Match</th><th>Market</th><th>Confidence</th><th>Cond</th><th>Printing</th>
               <th>Lang</th><th>Bin</th><th>Qty</th><th></th>
             </tr></thead>
             <tbody>{shown.map((it) => (
@@ -230,6 +241,14 @@ export default function ScanPage() {
                     <div className="muted">{it.card.set_code} #{it.card.collector_number} · {it.card.rarity}</div>
                     {it.card.image_url && <img className="card-img" src={it.card.image_url} alt="" />}
                   </>) : <span className="badge red">no match</span>}
+                </td>
+                <td style={{ whiteSpace: 'nowrap' }}>
+                  {it.market_value == null
+                    ? <span className="muted" title="No TCGplayer price data for this card/printing">—</span>
+                    : <b style={{ fontSize: 15, color: it.market_value >= NOTABLE_VALUE ? 'var(--green)' : 'var(--muted)' }}>
+                        {fmtMoney(it.market_value)}</b>}
+                  {it.quantity > 1 && it.market_value != null &&
+                    <div className="muted" style={{ fontSize: 11 }}>×{it.quantity} = {fmtMoney(it.market_value * it.quantity)}</div>}
                 </td>
                 <td>
                   <span className={`badge ${it.status === 'needs_review' ? 'yellow' : 'green'}`}>

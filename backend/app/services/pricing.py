@@ -135,6 +135,37 @@ def _price_rows(db: Session, product_id: int) -> list[PriceData]:
     ).scalars().all()
 
 
+def _pick_price_row(rows: list[PriceData], printing: str) -> PriceData:
+    """Choose the Normal vs Foil price row for a printing (same coarse rule as
+    ``base_price``: holo/foil/reverse read the non-Normal row when present)."""
+    want_foil = printing not in ("normal", "first_edition")
+    matched = [r for r in rows if (r.sub_type.lower() != "normal") == want_foil]
+    return matched[0] if matched else rows[0]
+
+
+def card_market_value(db: Session, card, printing: str = "normal") -> float | None:
+    """Headline market value for a catalog card, for at-a-glance triage.
+
+    Uses the same ordered source fallback as pricing (market → mid → low →
+    direct_low) and is printing-aware, but deliberately ignores condition, age
+    and the pricing tiers/guards — it's the raw sticker market number a seller
+    scans a scanned batch against, not the computed sell price. Returns None
+    when the card has no TCGplayer id or no price data.
+    """
+    if card is None or not getattr(card, "tcgplayer_product_id", None):
+        return None
+    rows = _price_rows(db, card.tcgplayer_product_id)
+    if not rows:
+        return None
+    row = _pick_price_row(rows, printing)
+    for src in DEFAULT_CONFIG["sources"]:
+        field = SOURCE_FIELDS.get(src)
+        v = getattr(row, field, None) if field else None
+        if v is not None and v > 0:
+            return round(float(v), 2)
+    return None
+
+
 def base_price(db: Session, item: InventoryItem, config: dict, trace: list) -> float | None:
     """Resolve the baseline market price via the ordered source fallback."""
     if not item.card or not item.card.tcgplayer_product_id:

@@ -7,10 +7,16 @@ from sqlalchemy.orm import Session
 
 from ..db import get_db
 from ..models import StagingItem
-from ..services import staging as staging_svc
+from ..services import pricing, staging as staging_svc
 from .serializers import staging_dict
 
 router = APIRouter(prefix="/api/staging", tags=["staging"])
+
+
+def _staging_dict(db: Session, row: StagingItem) -> dict:
+    """staging_dict enriched with the card's at-a-glance market value."""
+    return staging_dict(
+        row, market_value=pricing.card_market_value(db, row.card, row.printing))
 
 
 def _parse_date(value):
@@ -35,7 +41,7 @@ def list_staging(source: str = "", db: Session = Depends(get_db)):
     q = select(StagingItem).order_by(StagingItem.id.desc())
     if source:
         q = q.where(StagingItem.source == source)
-    return [staging_dict(s) for s in db.execute(q).scalars()]
+    return [_staging_dict(db, s) for s in db.execute(q).scalars()]
 
 
 @router.patch("/{row_id}")
@@ -50,7 +56,7 @@ def edit_row(row_id: int, payload: dict = Body(...), db: Session = Depends(get_d
     if "acquired_at" in payload:
         row.acquired_at = _parse_date(payload["acquired_at"])
     db.commit()
-    return staging_dict(row)
+    return _staging_dict(db, row)
 
 
 @router.post("/approve")

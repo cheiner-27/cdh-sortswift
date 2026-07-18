@@ -535,6 +535,9 @@ class OrderItem(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     order_id: Mapped[int] = mapped_column(ForeignKey("orders.id"), index=True)
     inventory_id: Mapped[int | None] = mapped_column(ForeignKey("inventory.id"), nullable=True)
+    # Catalog card the sold unit was, for lines with no live inventory record
+    # (e.g. migrated/historical sales) — lets Reports attribute them by game/set.
+    catalog_card_id: Mapped[int | None] = mapped_column(ForeignKey("catalog_cards.id"), nullable=True)
     lot_id: Mapped[int | None] = mapped_column(ForeignKey("lots.id"), nullable=True)
     description: Mapped[str] = mapped_column(String, default="")
     marketplace_product_id: Mapped[str | None] = mapped_column(String, nullable=True)

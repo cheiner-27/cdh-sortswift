@@ -78,6 +78,7 @@ export default function StagingPage() {
           <SortTh k="qty" accessor={(r) => r.quantity} sort={sort} toggle={sortBy}>Qty</SortTh>
           <SortTh k="cost" accessor={(r) => r.cost} sort={sort} toggle={sortBy}>Cost</SortTh>
           <SortTh k="acq" accessor={(r) => r.acquired_at} sort={sort} toggle={sortBy}>Acquired</SortTh>
+          <SortTh k="market" accessor={(r) => r.market_value || 0} sort={sort} toggle={sortBy}>Market</SortTh>
           <SortTh k="price" accessor={(r) => r.price} sort={sort} toggle={sortBy}>Price</SortTh>
           <SortTh k="comment" accessor={(r) => r.comment} sort={sort} toggle={sortBy}>Comment</SortTh>
         </tr></thead>
@@ -104,6 +105,9 @@ export default function StagingPage() {
               onBlur={(e) => patch(r.id, { cost: e.target.value === '' ? null : Number(e.target.value) })} /></td>
             <td><input type="date" style={{ width: 130 }} defaultValue={r.acquired_at ? r.acquired_at.slice(0, 10) : ''}
               onBlur={(e) => patch(r.id, { acquired_at: e.target.value || null })} title="Original purchase date (drives FIFO age)" /></td>
+            <td style={{ whiteSpace: 'nowrap' }} title="TCGplayer market value (reference)">
+              {r.market_value == null ? <span className="muted">—</span>
+                : <span style={{ color: r.market_value >= 2 ? 'var(--green)' : 'var(--muted)' }}>{fmtMoney(r.market_value)}</span>}</td>
             <td><input style={{ width: 65 }} defaultValue={r.price ?? ''}
               onBlur={(e) => patch(r.id, { price: e.target.value === '' ? null : Number(e.target.value) })} /></td>
             <td><input style={{ width: 130 }} defaultValue={r.comment}

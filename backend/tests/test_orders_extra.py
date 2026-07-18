@@ -101,6 +101,34 @@ def test_pick_list_configurable_by_bin(db):
     assert [r["bin"] for r in rows] == ["A1", "Z9"]
 
 
+# --- P&L cost spreading across games/sets ----------------------------------
+
+def test_pnl_by_game_splits_order_costs_pro_rata(db, card):
+    """A mixed-game order splits its fees pro-rata by item subtotal, while each
+    line's COGS/units land in its own game (regression: order-level costs used
+    to be dumped entirely on whichever group sorted first)."""
+    from app.services import reports as report_svc
+
+    mtg = stock(db, card, qty=2, cost=10.0)              # mtg (fixture card)
+    pkmn_card = _pokemon_card(db, "Pikachu", "58", 500)
+    pkmn = stock(db, pkmn_card, qty=2, cost=2.0)
+
+    o = order_svc.create_manual_order(
+        db, buyer_name="t", marketplace_fees=4.0,
+        items=[{"inventory_id": mtg.id, "quantity": 1, "unit_price": 30.0},
+               {"inventory_id": pkmn.id, "quantity": 1, "unit_price": 10.0}])
+    order_svc.mark_shipped(db, o)
+
+    rows = {r["group"]: r for r in report_svc.realized_pnl(db, group_by="game")}
+    assert set(rows) == {"mtg", "pokemon"}
+    # subtotal 40 → mtg 75% / pokemon 25%, so the $4 fee splits 3.0 / 1.0
+    assert rows["mtg"]["fees"] == 3.0 and rows["pokemon"]["fees"] == 1.0
+    assert rows["mtg"]["cogs"] == 10.0 and rows["pokemon"]["cogs"] == 2.0
+    assert rows["mtg"]["revenue"] == 30.0 and rows["pokemon"]["revenue"] == 10.0
+    assert rows["mtg"]["profit"] == 17.0 and rows["pokemon"]["profit"] == 7.0
+    assert rows["mtg"]["units"] == 1 and rows["pokemon"]["units"] == 1
+
+
 # --- Pokémon dedupe --------------------------------------------------------
 
 def test_dedupe_remaps_and_removes_legacy(db):

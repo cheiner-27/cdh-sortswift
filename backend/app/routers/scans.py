@@ -8,11 +8,17 @@ from sqlalchemy.orm import Session
 
 from ..db import get_db
 from ..models import CatalogCard, ProcessedScan, ScanPull, ScanQueueItem
-from ..services import exporting, scanning, staging as staging_svc
+from ..services import exporting, pricing, scanning, staging as staging_svc
 from ..services.settings import get_setting
 from .serializers import scan_item_dict
 
 router = APIRouter(prefix="/api/scans", tags=["scans"])
+
+
+def _scan_dict(db: Session, item: ScanQueueItem) -> dict:
+    """scan_item_dict enriched with the card's at-a-glance market value."""
+    return scan_item_dict(
+        item, market_value=pricing.card_market_value(db, item.card, item.printing))
 
 
 @router.post("/pull")
@@ -63,7 +69,7 @@ def queue(pull_id: int | None = None, status: str = "",
     items = db.execute(q.order_by(ScanQueueItem.seq)).scalars().all()
     if flagged_only:
         items = [i for i in items if i.status == "needs_review" or i.low_resolution]
-    return [scan_item_dict(i) for i in items]
+    return [_scan_dict(db, i) for i in items]
 
 
 @router.get("/image")
@@ -97,7 +103,7 @@ def update_item(item_id: int, payload: dict = Body(...), db: Session = Depends(g
         if item.status == "needs_review":
             item.status = "pending"
     db.commit()
-    return scan_item_dict(item)
+    return _scan_dict(db, item)
 
 
 @router.post("/queue/bulk")

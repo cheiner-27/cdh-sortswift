@@ -105,3 +105,13 @@ def ensure_schema() -> None:
         if "acquired_at" not in scols:
             with engine.begin() as conn:
                 conn.execute(text("ALTER TABLE staging ADD COLUMN acquired_at DATETIME"))
+
+    # 5) order_items: catalog card link for sold lines with no live inventory
+    #    record (migrated/historical sales) — enables by-game/set P&L.
+    if "order_items" in tables:
+        oicols = {c["name"] for c in insp.get_columns("order_items")}
+        if "catalog_card_id" not in oicols:
+            with engine.begin() as conn:
+                conn.execute(text(
+                    "ALTER TABLE order_items ADD COLUMN catalog_card_id INTEGER "
+                    "REFERENCES catalog_cards(id)"))

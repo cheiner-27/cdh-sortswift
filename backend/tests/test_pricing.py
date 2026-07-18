@@ -79,6 +79,25 @@ def test_marketplace_floor_raises_listed_price_only(db, card):
     assert r["marketplace_price"] == 0.99
 
 
+# --- at-a-glance market value (scan/staging sifting) -----------------------
+
+def test_card_market_value_printing_aware(db, card):
+    # Normal market 10.0, Foil market 25.0 (from the `card` fixture price rows).
+    assert pricing.card_market_value(db, card, "normal") == 10.0
+    assert pricing.card_market_value(db, card, "foil") == 25.0
+
+
+def test_card_market_value_none_without_price_data(db):
+    from app.models import CatalogCard
+    c = CatalogCard(game="mtg", external_id="no-price", tcgplayer_product_id=999,
+                    set_code="X", collector_number="1", name="Priceless",
+                    finishes=["normal"], languages=["en"])
+    db.add(c)
+    db.commit()
+    assert pricing.card_market_value(db, c, "normal") is None  # no PriceData rows
+    assert pricing.card_market_value(db, None, "normal") is None
+
+
 def test_platform_offsets_differ(db, card):
     c = cfg()
     c["tiers"][0]["offsets"]["ebay"] = {"pct": 20, "flat": 0}

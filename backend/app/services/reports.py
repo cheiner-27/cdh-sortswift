@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from ..models import AcquisitionLog, InventoryItem, Order, PriceData
+from ..models import AcquisitionLog, CatalogCard, InventoryItem, Order, PriceData
 from . import inventory as inv_svc
 
 AGE_BUCKETS = [(0, 30), (31, 60), (61, 90), (91, None)]
@@ -23,6 +23,10 @@ def realized_pnl(db: Session, *, group_by: str = "month",
     revenue; a full refund with the item returned nets to ~0 (revenue and COGS
     both back out) minus any return shipping; a full refund with the item NOT
     returned leaves the COGS as a real loss.
+
+    When grouping by game/set an order can span several groups: each line's COGS
+    and units land in its own group, and the order-level costs (fees, shipping,
+    refunds) are split pro-rata by each group's share of the item subtotal.
     """
     q = select(Order).where(
         Order.status.in_(["shipped", "partially_refunded", "refunded"]))
@@ -38,33 +42,63 @@ def realized_pnl(db: Session, *, group_by: str = "month",
             continue
         if date_to and when and when > date_to:
             continue
-        if group_by == "day":
-            keys = [when.strftime("%Y-%m-%d") if when else "unknown"]
-        elif group_by == "week":
-            keys = [f"{when.isocalendar().year}-W{when.isocalendar().week:02d}" if when else "unknown"]
-        elif group_by in ("game", "set"):
-            keys = set()
+        # Order-level money to attribute to this order's group(s).
+        order_revenue = order.order_total + (order.shipping_charged or 0.0)
+        order_refunds = order.amount_refunded or 0.0
+        order_shipping = order.shipping_cost + (order.return_shipping_cost or 0.0)
+        order_fees = order.marketplace_fees
+
+        if group_by in ("game", "set"):
+            # One order can span several games/sets. Attribute each line's COGS
+            # and units to its own group, then split the order-level costs
+            # pro-rata by each group's share of the item subtotal — marketplace
+            # fees scale with price, so a price-weighted split mirrors how they
+            # were charged (an even split would overcharge the cheaper cards).
+            per_group: dict[str, dict] = defaultdict(
+                lambda: {"weight": 0.0, "cogs": 0.0, "units": 0})
             for line in order.items:
                 item = db.get(InventoryItem, line.inventory_id) if line.inventory_id else None
-                card = item.card if item else None
+                # Historical/migrated lines carry no inventory record; fall back to
+                # the catalog card stamped on the line for game/set attribution.
+                card = item.card if item else (
+                    db.get(CatalogCard, line.catalog_card_id) if line.catalog_card_id else None)
                 if group_by == "game":
-                    keys.add(card.game if card else "custom/unknown")
+                    key = card.game if card else "custom/unknown"
                 else:
-                    keys.add(f"{card.game}:{card.set_code}" if card else "custom/unknown")
-            keys = list(keys) or ["unknown"]
-        else:  # month
-            keys = [when.strftime("%Y-%m") if when else "unknown"]
-        # order-level costs are attributed once (to the first key)
-        for i, key in enumerate(keys):
+                    key = f"{card.game}:{card.set_code}" if card else "custom/unknown"
+                pg = per_group[key]
+                pg["weight"] += line.unit_price * line.quantity
+                pg["cogs"] += line.cogs
+                pg["units"] += line.quantity
+            if not per_group:  # order with no line items: keep its money visible
+                per_group["unknown"] = {"weight": 0.0, "cogs": 0.0, "units": 0}
+            total_weight = sum(pg["weight"] for pg in per_group.values())
+            for key, pg in per_group.items():
+                # even split when nothing in the order carries a price (all 0)
+                share = pg["weight"] / total_weight if total_weight else 1.0 / len(per_group)
+                g = groups[key]
+                g["revenue"] += order_revenue * share
+                g["refunds"] += order_refunds * share
+                g["shipping"] += order_shipping * share
+                g["fees"] += order_fees * share
+                g["cogs"] += pg["cogs"]
+                g["units"] += pg["units"]
+                g["orders"] += 1  # an order is counted in every group it touches
+        else:
+            if group_by == "day":
+                key = when.strftime("%Y-%m-%d") if when else "unknown"
+            elif group_by == "week":
+                key = f"{when.isocalendar().year}-W{when.isocalendar().week:02d}" if when else "unknown"
+            else:  # month
+                key = when.strftime("%Y-%m") if when else "unknown"
             g = groups[key]
-            if i == 0:
-                g["revenue"] += order.order_total + (order.shipping_charged or 0.0)
-                g["refunds"] += order.amount_refunded or 0.0
-                g["shipping"] += order.shipping_cost + (order.return_shipping_cost or 0.0)
-                g["fees"] += order.marketplace_fees
-                g["cogs"] += sum(line.cogs for line in order.items)
-                g["orders"] += 1
-                g["units"] += sum(line.quantity for line in order.items)
+            g["revenue"] += order_revenue
+            g["refunds"] += order_refunds
+            g["shipping"] += order_shipping
+            g["fees"] += order_fees
+            g["cogs"] += sum(line.cogs for line in order.items)
+            g["units"] += sum(line.quantity for line in order.items)
+            g["orders"] += 1
     out = []
     for key in sorted(groups):
         g = groups[key]

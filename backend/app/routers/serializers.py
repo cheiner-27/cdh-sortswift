@@ -51,7 +51,7 @@ def inventory_dict(it: InventoryItem, *, age_days: int | None = None,
     }
 
 
-def scan_item_dict(s: ScanQueueItem) -> dict:
+def scan_item_dict(s: ScanQueueItem, *, market_value: float | None = None) -> dict:
     return {
         "id": s.id, "pull_id": s.pull_id, "seq": s.seq,
         "image_path": s.image_path, "back_image_path": s.back_image_path,
@@ -61,11 +61,11 @@ def scan_item_dict(s: ScanQueueItem) -> dict:
         "card": card_dict(s.card), "card_id": s.card_id,
         "condition": s.condition, "printing": s.printing,
         "language": s.language, "bin": s.bin, "quantity": s.quantity,
-        "cost": s.cost,
+        "cost": s.cost, "market_value": market_value,
     }
 
 
-def staging_dict(s: StagingItem) -> dict:
+def staging_dict(s: StagingItem, *, market_value: float | None = None) -> dict:
     return {
         "id": s.id, "source": s.source, "card": card_dict(s.card),
         "custom_sku_id": s.custom_sku_id,
@@ -77,6 +77,7 @@ def staging_dict(s: StagingItem) -> dict:
         "acquired_at": s.acquired_at.isoformat() if s.acquired_at else None,
         "scan_image_path": s.scan_image_path,
         "import_batch_id": s.import_batch_id,
+        "market_value": market_value,
         "created_at": s.created_at.isoformat() if s.created_at else None,
     }
 
