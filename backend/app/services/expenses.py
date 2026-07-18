@@ -10,12 +10,15 @@ from collections import defaultdict
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from ..domain import EXPENSE_CATEGORIES, EXPENSE_RETAILERS
+from ..domain import (
+    CAPEX_CATEGORIES, EXPENSE_CATEGORIES, EXPENSE_CLASSES, EXPENSE_RETAILERS,
+    default_expense_class,
+)
 from ..models import Expense
 from .settings import get_setting
 
-FIELDS = ("date", "name", "category", "retailer", "payment_method",
-          "quantity", "subtotal", "tax_override", "notes")
+FIELDS = ("date", "name", "category", "expense_class", "retailer",
+          "payment_method", "quantity", "subtotal", "tax_override", "notes")
 
 
 def default_rate(db: Session) -> float:
@@ -35,6 +38,7 @@ def to_dict(db: Session, e: Expense) -> dict:
     tax = tax_for(db, e.subtotal, e.tax_override)
     return {
         "id": e.id, "date": e.date, "name": e.name, "category": e.category,
+        "expense_class": e.expense_class or "opex",
         "retailer": e.retailer, "payment_method": e.payment_method,
         "quantity": e.quantity, "subtotal": e.subtotal,
         "tax_override": e.tax_override, "tax": tax,
@@ -63,6 +67,8 @@ def create_expense(db: Session, payload: dict) -> Expense:
     e = Expense(**{f: payload.get(f) for f in FIELDS if f in payload})
     if e.quantity is None:
         e.quantity = 1
+    if not e.expense_class:  # not supplied — infer from the category
+        e.expense_class = default_expense_class(e.category)
     db.add(e)
     db.commit()
     return e
@@ -81,6 +87,7 @@ def summary(db: Session, date_from: str | None = None,
     rows = list_expenses(db, date_from, date_to)
     by_category: dict[str, float] = defaultdict(float)
     by_retailer: dict[str, float] = defaultdict(float)
+    by_class: dict[str, float] = defaultdict(float)
     total_subtotal = total_tax = 0.0
     for e in rows:
         tax = tax_for(db, e.subtotal, e.tax_override)
@@ -89,11 +96,19 @@ def summary(db: Session, date_from: str | None = None,
         total_tax += tax
         by_category[e.category or "(uncategorized)"] += total
         by_retailer[e.retailer or "(none)"] += total
+        by_class[e.expense_class or "opex"] += total
     return {
         "count": len(rows),
         "total_subtotal": round(total_subtotal, 2),
         "total_tax": round(total_tax, 2),
         "total": round(total_subtotal + total_tax, 2),
+        # Capex vs opex split. Both are deducted from net profit in-period
+        # (de minimis), but capital spend is reported on its own line.
+        "total_opex": round(by_class.get("opex", 0.0), 2),
+        "total_capex": round(by_class.get("capex", 0.0), 2),
+        "by_class": sorted(({"key": k, "total": round(v, 2)}
+                            for k, v in by_class.items()),
+                           key=lambda x: -x["total"]),
         "by_category": sorted(({"key": k, "total": round(v, 2)}
                                for k, v in by_category.items()),
                               key=lambda x: -x["total"]),
@@ -112,5 +127,8 @@ def suggestions(db: Session) -> dict:
     return {
         "retailers": retailers,
         "categories": categories,
+        "classes": list(EXPENSE_CLASSES),
+        # category -> suggested class, so the UI can auto-fill on category change
+        "capex_categories": sorted(CAPEX_CATEGORIES),
         "payment_methods": sorted({e.payment_method for e in rows if e.payment_method}),
     }

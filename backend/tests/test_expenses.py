@@ -25,6 +25,40 @@ def test_configurable_rate(db):
     assert exp.to_dict(db, e)["tax"] == 8.0
 
 
+def test_expense_class_defaults_from_category(db):
+    # Equipment is a durable asset -> capex; everything else -> opex.
+    printer = exp.create_expense(db, {"name": "3D Printer", "category": "Equipment",
+                                      "subtotal": 170.0})
+    sleeves = exp.create_expense(db, {"name": "Penny Sleeves", "category": "Supplies",
+                                      "subtotal": 9.99})
+    bare = exp.create_expense(db, {"name": "Misc", "subtotal": 5.0})  # no category
+    assert exp.to_dict(db, printer)["expense_class"] == "capex"
+    assert exp.to_dict(db, sleeves)["expense_class"] == "opex"
+    assert exp.to_dict(db, bare)["expense_class"] == "opex"
+
+
+def test_expense_class_explicit_override_wins(db):
+    # A durable category can still be tagged opex explicitly, and vice versa.
+    e = exp.create_expense(db, {"name": "Cheap tool", "category": "Equipment",
+                                "expense_class": "opex", "subtotal": 4.0})
+    assert exp.to_dict(db, e)["expense_class"] == "opex"
+
+
+def test_summary_splits_opex_and_capex(db):
+    exp.create_expense(db, {"name": "Sleeves", "category": "Supplies",
+                            "subtotal": 10.0, "tax_override": 0})
+    exp.create_expense(db, {"name": "Stamps", "category": "Postage",
+                            "subtotal": 20.0, "tax_override": 0})
+    exp.create_expense(db, {"name": "Scanner", "category": "Equipment",
+                            "subtotal": 330.0, "tax_override": 0})
+    s = exp.summary(db)
+    assert s["total_opex"] == 30.0      # sleeves + stamps
+    assert s["total_capex"] == 330.0    # scanner
+    assert s["total"] == 360.0
+    classes = {c["key"]: c["total"] for c in s["by_class"]}
+    assert classes == {"opex": 30.0, "capex": 330.0}
+
+
 def test_summary_groups_and_date_filter(db):
     exp.create_expense(db, {"date": "2026-01-05", "name": "A", "category": "Supplies",
                             "retailer": "Amazon", "subtotal": 10.0, "tax_override": 0})

@@ -43,8 +43,8 @@ export default function ExpensesPage() {
           <button className="small" onClick={() => setRange({ date_from: '', date_to: '' })}>clear</button>}
         <span style={{ flex: 1 }} />
         <button className="primary" onClick={() => setEdit({
-          date: today(), name: '', category: '', retailer: '', payment_method: '',
-          quantity: 1, subtotal: '', tax_override: '', notes: '',
+          date: today(), name: '', category: '', expense_class: 'opex', retailer: '',
+          payment_method: '', quantity: 1, subtotal: '', tax_override: '', notes: '',
         })}>+ New expense</button>
       </div>
       <Msg msg={msg} />
@@ -55,7 +55,9 @@ export default function ExpensesPage() {
             <div className="label">{summary.count} expense(s){range.date_from || range.date_to ? ' in range' : ' all time'}</div></div>
           <div className="stat"><div className="value">{fmtMoney(summary.total_subtotal)}</div><div className="label">subtotal</div></div>
           <div className="stat"><div className="value">{fmtMoney(summary.total_tax)}</div><div className="label">tax</div></div>
-          {summary.by_category.slice(0, 4).map((c) => (
+          <div className="stat"><div className="value">{fmtMoney(summary.total_opex)}</div><div className="label">operating (opex)</div></div>
+          <div className="stat"><div className="value">{fmtMoney(summary.total_capex)}</div><div className="label">capital (capex)</div></div>
+          {summary.by_category.slice(0, 3).map((c) => (
             <div className="stat" key={c.key}><div className="value">{fmtMoney(c.total)}</div>
               <div className="label">{c.key}</div></div>))}
         </div>
@@ -66,6 +68,7 @@ export default function ExpensesPage() {
           <SortTh k="date" accessor={(e) => e.date} sort={sort} toggle={toggle}>Date</SortTh>
           <SortTh k="name" accessor={(e) => e.name} sort={sort} toggle={toggle}>Name</SortTh>
           <SortTh k="category" accessor={(e) => e.category} sort={sort} toggle={toggle}>Category</SortTh>
+          <SortTh k="expense_class" accessor={(e) => e.expense_class} sort={sort} toggle={toggle}>Class</SortTh>
           <SortTh k="retailer" accessor={(e) => e.retailer} sort={sort} toggle={toggle}>Retailer</SortTh>
           <SortTh k="qty" accessor={(e) => e.quantity} sort={sort} toggle={toggle}>Qty</SortTh>
           <SortTh k="subtotal" accessor={(e) => e.subtotal} sort={sort} toggle={toggle}>Subtotal</SortTh>
@@ -78,6 +81,9 @@ export default function ExpensesPage() {
             <td className="muted">{e.date || '—'}</td>
             <td>{e.name}{e.notes && <div className="muted" style={{ fontSize: 11 }}>{e.notes}</div>}</td>
             <td className="muted">{e.category || '—'}</td>
+            <td>{e.expense_class === 'capex'
+              ? <span className="badge blue">capex</span>
+              : <span className="badge">opex</span>}</td>
             <td>{e.retailer || '—'}</td>
             <td>{e.quantity}</td>
             <td>{fmtMoney(e.subtotal)}</td>
@@ -103,6 +109,12 @@ function ExpenseModal({ expense, sugg, onClose }) {
   const [msg, ok, err] = useMsg()
   const [e, setE] = useState(structuredClone(expense))
   const set = (k, v) => setE({ ...e, [k]: v })
+  // Picking a category re-suggests its class (Equipment → capex, else opex);
+  // the class can still be overridden afterward.
+  const setCategory = (v) => setE({
+    ...e, category: v,
+    expense_class: (sugg.capex_categories || []).includes(v) ? 'capex' : 'opex',
+  })
   const save = async () => {
     try {
       const body = {
@@ -123,8 +135,12 @@ function ExpenseModal({ expense, sugg, onClose }) {
         <Field label="Name"><input style={{ width: 220 }} value={e.name} placeholder="e.g. Penny Sleeves"
           onChange={(ev) => set('name', ev.target.value)} /></Field>
         <Field label="Category">
-          <DropdownWithAdd value={e.category} onChange={(v) => set('category', v)}
+          <DropdownWithAdd value={e.category} onChange={setCategory}
             options={sugg.categories} width={150} placeholder="select…" /></Field>
+        <Field label="Class">
+          <select value={e.expense_class || 'opex'} onChange={(ev) => set('expense_class', ev.target.value)}>
+            {(sugg.classes || ['opex', 'capex']).map((c) => <option key={c} value={c}>{c}</option>)}
+          </select></Field>
         <Field label="Retailer">
           <DropdownWithAdd value={e.retailer} onChange={(v) => set('retailer', v)}
             options={sugg.retailers} width={150} placeholder="select…" /></Field>
@@ -144,7 +160,7 @@ function ExpenseModal({ expense, sugg, onClose }) {
         <Field label="Notes"><textarea rows={2} style={{ width: 460 }} value={e.notes}
           onChange={(ev) => set('notes', ev.target.value)} /></Field>
       </div>
-      <p className="muted" style={{ fontSize: 12 }}>Tax auto-calculates at the default rate (Settings) of the subtotal; enter an override for exact amounts. Total = subtotal + tax.</p>
+      <p className="muted" style={{ fontSize: 12 }}>Tax auto-calculates at the default rate (Settings) of the subtotal; enter an override for exact amounts. Total = subtotal + tax. <b>Class</b>: <i>opex</i> = consumables/overhead (sleeves, stamps, subscriptions); <i>capex</i> = durable equipment (printer, scanner). Both count toward net profit, but are reported separately.</p>
       <div className="row center">
         <button className="primary" onClick={save}>Save expense</button>
         <Msg msg={msg} />

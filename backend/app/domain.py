@@ -77,6 +77,23 @@ EXPENSE_CATEGORIES = [
 ]
 EXPENSE_RETAILERS = ["Amazon", "Airtable", "eBay", "Lovable", "USPS"]
 
+# Capex vs opex. Opex (consumables, postage, software subscriptions, fees) is
+# operating overhead expensed in the period it's incurred. Capex is a durable
+# asset with a useful life beyond one year (printer, scanner, cutter, shelving).
+# Under the IRS de minimis safe harbor a small business still expenses low-cost
+# capex (< $2,500/item) in-period, so net profit treats both the same — but the
+# class is tracked so capital spend is visible separately from operating cost.
+EXPENSE_CLASSES = ["opex", "capex"]
+# Categories whose purchases are durable assets (capex) by default. Everything
+# else defaults to opex. This is only the default suggestion — the class is
+# stored per expense and can be overridden.
+CAPEX_CATEGORIES = {"Equipment"}
+
+
+def default_expense_class(category: str | None) -> str:
+    """Suggested capex/opex class for a category (see CAPEX_CATEGORIES)."""
+    return "capex" if (category or "").strip() in CAPEX_CATEGORIES else "opex"
+
 # Default platform seeds for manually-recorded (off-sync) sales. Merged with the
 # platforms already used on prior manual orders (see /api/orders/platforms).
 SALE_PLATFORMS = ["eBay", "TCGplayer", "Whatnot"]

@@ -115,3 +115,18 @@ def ensure_schema() -> None:
                 conn.execute(text(
                     "ALTER TABLE order_items ADD COLUMN catalog_card_id INTEGER "
                     "REFERENCES catalog_cards(id)"))
+
+    # 6) expenses.expense_class: capex vs opex classification (additive).
+    #    Existing rows default to opex; backfill durable-asset categories
+    #    (Equipment) to capex so the printer/scanner land in capital spend.
+    if "expenses" in tables:
+        ecols = {c["name"] for c in insp.get_columns("expenses")}
+        if "expense_class" not in ecols:
+            from .domain import CAPEX_CATEGORIES
+            with engine.begin() as conn:
+                conn.execute(text(
+                    "ALTER TABLE expenses ADD COLUMN expense_class VARCHAR DEFAULT 'opex'"))
+                for cat in CAPEX_CATEGORIES:
+                    conn.execute(
+                        text("UPDATE expenses SET expense_class = 'capex' "
+                             "WHERE category = :c"), {"c": cat})

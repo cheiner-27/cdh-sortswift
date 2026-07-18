@@ -19,6 +19,8 @@ export default function ReportsPage() {
   }, [])
 
   const salesProfit = pnl.reduce((s, r) => s + (r.profit || 0), 0)
+  const opex = expenses?.total_opex || 0
+  const capex = expenses?.total_capex || 0
   const expenseTotal = expenses?.total || 0
   const net = salesProfit - expenseTotal
 
@@ -29,12 +31,14 @@ export default function ReportsPage() {
       <div className="stats">
         <div className="stat"><div className="value" style={{ color: salesProfit >= 0 ? 'var(--green)' : 'var(--red)' }}>{fmtMoney(salesProfit)}</div>
           <div className="label">sales profit (all groups)</div></div>
-        <div className="stat"><div className="value" style={{ color: 'var(--red)' }}>−{fmtMoney(expenseTotal)}</div>
-          <div className="label">operating expenses (all time)</div></div>
+        <div className="stat"><div className="value" style={{ color: 'var(--red)' }}>−{fmtMoney(opex)}</div>
+          <div className="label">operating expenses (opex)</div></div>
+        <div className="stat"><div className="value" style={{ color: 'var(--red)' }}>−{fmtMoney(capex)}</div>
+          <div className="label">capital expenditures (capex)</div></div>
         <div className="stat"><div className="value" style={{ color: net >= 0 ? 'var(--green)' : 'var(--red)' }}>{fmtMoney(net)}</div>
           <div className="label">net profit</div></div>
       </div>
-      <p className="muted" style={{ fontSize: 12, marginTop: -8 }}>Net = sales profit − operating expenses. Expenses (supplies, postage, software…) are tracked on the <b>Expenses</b> page. The sales-profit total sums the P&L groups below; expenses here are all-time.</p>
+      <p className="muted" style={{ fontSize: 12, marginTop: -8 }}>Net = sales profit − operating expenses − capital expenditures. <b>Opex</b> is recurring overhead (supplies, postage, software); <b>capex</b> is durable equipment. Both are expensed in-period here (de minimis safe harbor — all items are under the $2,500/item threshold), but shown separately. Expenses are tracked on the <b>Expenses</b> page; the sales-profit total sums the P&L groups below, and expenses here are all-time.</p>
 
       <div className="panel">
         <div className="row center">

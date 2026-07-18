@@ -372,6 +372,9 @@ class Expense(Base):
     date: Mapped[str | None] = mapped_column(String, index=True, nullable=True)  # ISO YYYY-MM-DD
     name: Mapped[str] = mapped_column(String, default="")
     category: Mapped[str] = mapped_column(String, default="", index=True)
+    # opex (operating overhead, expensed now) | capex (durable asset). Both hit
+    # net profit in-period (de minimis safe harbor) but are reported separately.
+    expense_class: Mapped[str] = mapped_column(String, default="opex", index=True)
     retailer: Mapped[str] = mapped_column(String, default="")
     payment_method: Mapped[str] = mapped_column(String, default="")
     quantity: Mapped[int] = mapped_column(Integer, default=1)
