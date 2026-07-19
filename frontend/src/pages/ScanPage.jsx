@@ -24,6 +24,7 @@ export default function ScanPage() {
   const [items, setItems] = useState([])
   const [activePull, setActivePull] = useState(null)
   const [selected, setSelected] = useState(new Set())
+  const [selectedPulls, setSelectedPulls] = useState(new Set())
   const [sortKey, setSortKey] = useState('scan')
   const [flaggedOnly, setFlaggedOnly] = useState(false)
   const [detail, setDetail] = useState(null) // item shown in alternatives/manual modal
@@ -83,6 +84,28 @@ export default function ScanPage() {
   })
   const toggleAll = () => setSelected((s) =>
     s.size === shown.length ? new Set() : new Set(shown.map((i) => i.id)))
+
+  const togglePull = (id) => setSelectedPulls((s) => {
+    const n = new Set(s); n.has(id) ? n.delete(id) : n.add(id); return n
+  })
+  const toggleAllPulls = () => setSelectedPulls((s) =>
+    s.size === pulls.length ? new Set() : new Set(pulls.map((p) => p.id)))
+
+  const deleteSelectedPulls = async () => {
+    const ids = [...selectedPulls]
+    if (!ids.length) return
+    if (!window.confirm(
+      `Delete ${ids.length} batch(es)? Their images will no longer count as ` +
+      `already-pulled, so the next Pull Scans will bring them back in. ` +
+      `Cards already confirmed to staging are not affected.`)) return
+    try {
+      const res = await api.post('/api/scans/pulls/delete', { pull_ids: ids })
+      ok(`Deleted ${res.deleted_pulls} batch(es), freed ${res.cleared_hashes} image(s)`)
+      setSelectedPulls(new Set())
+      if (activePull && ids.includes(activePull)) { setActivePull(null); setItems([]) }
+      await refreshPulls()
+    } catch (e) { err(e) }
+  }
 
   const patchItem = async (id, payload) => {
     const updated = await api.patch(`/api/scans/queue/${id}`, payload)
@@ -160,11 +183,22 @@ export default function ScanPage() {
       </div>
 
       <div className="panel">
-        <h3 style={{ marginTop: 0 }}>Past pulls</h3>
+        <div className="row center">
+          <h3 style={{ margin: 0 }}>Past pulls</h3>
+          <span style={{ flex: 1 }} />
+          <span className="muted">{selectedPulls.size} selected</span>
+          <button className="small danger" disabled={!selectedPulls.size} onClick={deleteSelectedPulls}
+            title="Delete these batches and forget their image hashes so the images can be pulled again">
+            Delete batch(es)
+          </button>
+        </div>
         <div className="table-wrap"><table>
-          <thead><tr><th>ID</th><th>Date</th><th>Folder</th><th>Images</th><th>Resolved</th><th>Pending</th><th></th></tr></thead>
+          <thead><tr>
+            <th><input type="checkbox" checked={selectedPulls.size === pulls.length && pulls.length > 0} onChange={toggleAllPulls} /></th>
+            <th>ID</th><th>Date</th><th>Folder</th><th>Images</th><th>Resolved</th><th>Pending</th><th></th></tr></thead>
           <tbody>{pulls.map((p) => (
             <tr key={p.id} style={activePull === p.id ? { background: 'rgba(79,156,249,0.1)' } : {}}>
+              <td><input type="checkbox" checked={selectedPulls.has(p.id)} onChange={() => togglePull(p.id)} /></td>
               <td>{p.id}</td>
               <td>{p.pulled_at?.slice(0, 16).replace('T', ' ')}</td>
               <td className="muted">{p.folder}</td>

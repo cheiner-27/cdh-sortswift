@@ -56,6 +56,32 @@ def list_pulls(db: Session = Depends(get_db)):
     return out
 
 
+@router.post("/pulls/delete")
+def delete_pulls(payload: dict = Body(...), db: Session = Depends(get_db)):
+    """Delete whole batches: forgets their processed-scan hashes (so the
+    source images are picked up again by the next pull), and removes their
+    queue items and pull records. Cards already confirmed to staging are
+    unaffected — StagingItem is copied out independently of the scan queue.
+    """
+    ids = payload.get("pull_ids", [])
+    if not ids:
+        raise HTTPException(400, "no pull_ids given")
+    hashes = db.execute(select(ProcessedScan).where(
+        ProcessedScan.pull_id.in_(ids))).scalars().all()
+    for h in hashes:
+        db.delete(h)
+    items = db.execute(select(ScanQueueItem).where(
+        ScanQueueItem.pull_id.in_(ids))).scalars().all()
+    for it in items:
+        db.delete(it)
+    pulls = db.execute(select(ScanPull).where(ScanPull.id.in_(ids))).scalars().all()
+    deleted = len(pulls)
+    for p in pulls:
+        db.delete(p)
+    db.commit()
+    return {"deleted_pulls": deleted, "cleared_hashes": len(hashes), "removed_items": len(items)}
+
+
 @router.get("/queue")
 def queue(pull_id: int | None = None, status: str = "",
           flagged_only: bool = False, db: Session = Depends(get_db)):
