@@ -296,6 +296,56 @@ def recognize_image(db: Session, image_path: str, game: str) -> dict:
             "confidence": confidence, "language": language}
 
 
+# Trailing OS duplicate-suffix, e.g. "...0007F (1).jpg" -> ignored when
+# matching so a scanner naming glitch doesn't break front/back pairing.
+_DUP_SUFFIX_RE = re.compile(r"\s*\(\d+\)$")
+_SIDE_RE = re.compile(r"^(?P<key>.+?)(?P<side>[FB])$", re.IGNORECASE)
+
+
+def _parse_scan_name(path: Path) -> tuple[str, str | None]:
+    """Split a scan filename into its pairing key and side (F/B).
+
+    Expected convention: ``{date}-image-{####}{F|B}``, e.g.
+    ``20260718-image-0007F.jpg`` paired with ``20260718-image-0007B.jpg``.
+    Returns (key, None) when the name has no recognized F/B suffix.
+    """
+    stem = _DUP_SUFFIX_RE.sub("", path.stem)
+    m = _SIDE_RE.match(stem)
+    if m:
+        return m.group("key"), m.group("side").upper()
+    return stem, None
+
+
+def _pair_scan_files(
+    files: list[Path], pair_front_back: bool,
+) -> list[tuple[Path, Path | None]]:
+    """Pair front/back images by filename rather than by folder order.
+
+    Files with no matching counterpart (an orphaned back, or a name with no
+    F/B suffix) are kept as front-only rather than dropped, since we only
+    ever run recognition on the front image.
+    """
+    if not pair_front_back:
+        return [(f, None) for f in files]
+
+    fronts: dict[str, Path] = {}
+    backs: dict[str, Path] = {}
+    loners: list[Path] = []
+    for path in files:
+        key, side = _parse_scan_name(path)
+        if side == "F":
+            fronts[key] = path
+        elif side == "B":
+            backs[key] = path
+        else:
+            loners.append(path)
+
+    pairs = [(front, backs.pop(key, None)) for key, front in sorted(fronts.items())]
+    pairs.extend((p, None) for p in sorted(backs.values(), key=lambda p: p.name))
+    pairs.extend((p, None) for p in loners)
+    return pairs
+
+
 def pull_scans(
     db: Session, folder: str, game: str, *,
     use_subfolder_bins: bool = False, pair_front_back: bool = False,
@@ -341,15 +391,7 @@ def pull_scans(
             db.add(ProcessedScan(sha256=digest, file_path=str(path), pull_id=pull.id))
             new_files.append(path)
 
-        i = 0
-        while i < len(new_files):
-            front = new_files[i]
-            back = None
-            if pair_front_back and i + 1 < len(new_files):
-                back = new_files[i + 1]
-                i += 2
-            else:
-                i += 1
+        for front, back in _pair_scan_files(new_files, pair_front_back):
             seq += 1
             count += 1 + (1 if back else 0)
             rec = recognize_image(db, str(front), game)

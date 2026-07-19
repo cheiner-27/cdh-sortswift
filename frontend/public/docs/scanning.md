@@ -19,9 +19,15 @@ but you can point it anywhere per session.
 - **"each subfolder is a bin"** — instead of reading images in the folder
   itself, treat every immediate subfolder as its own bin and pull the images
   inside each. Handy if you pre-sort scans into bin-named folders.
-- **"pair front/back images"** — treat consecutive files as front/back of one
-  card (the 2nd image becomes that card's back image). *(You can leave this off
-  until your scanner is set up and you know how it names front/back files.)*
+- **"pair front/back images"** — matches files by name, not folder order.
+  Front/back images must share the same name except for a trailing `F` or `B`,
+  e.g. `20260718-image-0007F.jpg` pairs with `20260718-image-0007B.jpg` (the
+  `B` file becomes that card's back image; only the `F` file is run through
+  recognition). A file with no `F`/`B` suffix, or a back with no matching
+  front, is just kept as its own front-only card rather than dropped. A
+  trailing `(1)`-style OS duplicate suffix (from a scanner naming glitch) is
+  ignored when matching. *(Leave this off if your scanner doesn't name files
+  this way.)*
 
 Files are **never moved, renamed, or deleted.** Re-pulling the same folder is
 safe — already-seen images (by SHA-256 hash) are skipped.

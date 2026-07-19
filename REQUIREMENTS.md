@@ -100,7 +100,7 @@ Catalog data (card names, set codes, collector numbers, printings, images) is fe
 
 **Input method:** Folder-based pull. User sets a default scan folder (scanner saves images there). A "Pull Scans" button in the UI reads new images from the folder.
 - Supports a parent folder containing per-bin subfolders (e.g. `Bin1/`, `Bin2/`); a "use subfolder as bin" toggle pulls all subfolders in one operation and auto-assigns each card's bin from its immediate parent folder name, instead of requiring one pull per bin.
-- Optional front/back pairing toggle: treats sequential image pairs in a pull as one card — the first image is used for recognition, the second stored as a secondary reference photo (useful for double-faced cards or two-sided listing photos).
+- Optional front/back pairing toggle: pairs images by filename rather than folder order — files must share the same name except for a trailing `F`/`B` (e.g. `{date}-image-{####}F.jpg` / `...B.jpg`). The front image is used for recognition, the back stored as a secondary reference photo (useful for double-faced cards or two-sided listing photos). A trailing OS duplicate suffix (e.g. ` (1)`, from a scanner naming glitch) is ignored when matching. Unmatched files (no F/B suffix, or an orphaned back) are kept as their own front-only card.
 - Supported formats: JPEG, PNG, WEBP. Flag images below a minimum resolution threshold at pull time as likely to fail OCR.
 
 **Deduplication:** On pull, compute SHA-256 hash of each image file. Cross-reference against a `processed_scans` table in the DB. Skip any image whose hash has already been processed. Files are never moved or deleted.
