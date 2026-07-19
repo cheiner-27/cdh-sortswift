@@ -57,7 +57,13 @@ PATTERNS = {
     "onepiece": [re.compile(r"\b(OP\d{2}|ST\d{2}|EB\d{2}|P)-(\d{3})\b", re.I)],
     "yugioh": [re.compile(r"\b([A-Z0-9]{2,5})-([A-Z]{2})?(\d{3})\b")],
     "mtg": [
-        re.compile(r"\b(\d{1,4})[a-z]?\s*[/·•*]?\s*(\d{1,4})?\s*\n?\s*([A-Z0-9]{3,5})\b"),
+        # Separator is required (not optional): pre-8th-edition cards print no
+        # collector number at all, only a bare copyright year ("(c) 1997") in
+        # this crop region. An optional separator let this pattern split that
+        # year into a fake number+set-code pair (e.g. "1997" -> "1" / "997"),
+        # so vintage cards got bogus high-"confidence" OCR hits instead of
+        # correctly falling through to phash.
+        re.compile(r"\b(\d{1,4})[a-z]?\s*[/·•*]\s*(\d{1,4})?\s*\n?\s*([A-Z0-9]{3,5})\b"),
         re.compile(r"\b([A-Z0-9]{3,5})\s*[·•*]\s*[A-Z]{2}\b"),
         re.compile(r"\b(\d{1,4})\s*/\s*(\d{1,4})\b"),
     ],
