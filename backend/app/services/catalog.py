@@ -26,7 +26,7 @@ from sqlalchemy.orm import Session
 
 from ..models import (
     AcquisitionLog, CatalogCard, CatalogSet, InventoryItem, PriceData,
-    ScanQueueItem, StagingItem, collector_number_key, utcnow,
+    ScanQueueItem, StagingItem, collector_number_key, name_key, utcnow,
 )
 from .httpclient import client as _http_client
 
@@ -61,6 +61,7 @@ def _tcgplayer_hires(url: str | None) -> str | None:
 def _upsert_card(db: Session, **kw) -> CatalogCard:
     # Keep the numerator matching key in lockstep with the printed number.
     kw["collector_number_norm"] = collector_number_key(kw.get("collector_number"))
+    kw["name_norm"] = name_key(kw.get("name"))
     existing = db.execute(
         select(CatalogCard).where(
             CatalogCard.game == kw["game"],

@@ -48,7 +48,7 @@ def ensure_schema() -> None:
     is idempotent and safe to run on every startup.
     """
     from sqlalchemy import inspect, text
-    from .models import PricingConfig, collector_number_key
+    from .models import PricingConfig, collector_number_key, name_key
 
     insp = inspect(engine)
     tables = set(insp.get_table_names())
@@ -130,3 +130,22 @@ def ensure_schema() -> None:
                     conn.execute(
                         text("UPDATE expenses SET expense_class = 'capex' "
                              "WHERE category = :c"), {"c": cat})
+
+    # 7) catalog_cards.name_norm (OCR name-matching key, powers the
+    #    name-first recognition tier alongside collector_number_norm above).
+    if "catalog_cards" in tables:
+        cols = {c["name"] for c in insp.get_columns("catalog_cards")}
+        if "name_norm" not in cols:
+            with engine.begin() as conn:
+                conn.execute(text(
+                    "ALTER TABLE catalog_cards ADD COLUMN name_norm VARCHAR"))
+                rows = conn.execute(
+                    text("SELECT id, name FROM catalog_cards")).fetchall()
+                for rid, nm in rows:
+                    conn.execute(
+                        text("UPDATE catalog_cards SET name_norm = :k "
+                             "WHERE id = :i"),
+                        {"k": name_key(nm), "i": rid})
+                conn.execute(text(
+                    "CREATE INDEX IF NOT EXISTS ix_cards_game_namenorm "
+                    "ON catalog_cards (game, name_norm)"))

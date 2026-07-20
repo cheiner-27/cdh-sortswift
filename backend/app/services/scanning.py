@@ -2,9 +2,18 @@
 
 Pipeline per image:
 1. SHA-256 dedup against processed_scans (files never moved/deleted).
-2. OCR (pytesseract) on game-specific crop regions to extract set code /
-   collector number, looked up against the local catalog.
-3. Perceptual-hash fallback against pre-computed catalog phashes (top-N).
+2. OCR (pytesseract) on game-specific crop regions, tried in order of
+   specificity:
+   a. Title band -> card name -> catalog rows sharing that name (many, if
+      it's a reprinted card -- narrows the field rather than pinning a print).
+   b. Bottom-of-card set code / collector number -> a specific printing,
+      cross-narrowed against (a) if both hit.
+3. Perceptual-hash fallback against pre-computed catalog phashes, scoped to
+   whatever (2) narrowed the field to (a name match, or just a set code) so
+   the hash only has to disambiguate a handful of prints, not the catalog.
+   Falls back to an unscoped hash sweep if the scoped pool comes up empty,
+   since a bad OCR read narrowing to the wrong pool must never be worse than
+   no narrowing at all.
 4. Anything unresolved -> manual search in the UI.
 
 OCR and phash dependencies are optional imports so the app runs without
@@ -20,6 +29,7 @@ from sqlalchemy.orm import Session
 
 from ..models import (
     CatalogCard, ProcessedScan, ScanPull, ScanQueueItem, collector_number_key,
+    name_key,
 )
 from .settings import get_setting
 
@@ -43,13 +53,34 @@ except ImportError:  # pragma: no cover
     pytesseract = None
 
 
-# --- OCR text regions (fractions of image W/H) per game -------------------
-# (left, top, right, bottom) crop boxes over likely collector-info locations.
+# --- OCR text regions (fractions of the *card*, not the raw image) --------
+# (left, top, right, bottom) crop boxes over likely text locations, expressed
+# as fractions of the detected card bounding box (see _locate_card). A flatbed
+# scan sits inside a fairly uniform scanner-bed background with the card
+# placed a few percent off-edge, and that placement varies scan to scan --
+# fractions of the raw image drift out of alignment with the actual text by
+# exactly that placement variance, which is large relative to a text band
+# only ~5-10% of the card's height. Cropping relative to the card itself
+# keeps these aligned regardless of where the card landed on the bed.
 OCR_REGIONS = {
     "mtg": [(0.0, 0.90, 0.45, 1.0)],                       # bottom-left
     "pokemon": [(0.55, 0.90, 1.0, 1.0), (0.0, 0.90, 0.45, 1.0)],  # bottom-right (older: left)
     "onepiece": [(0.0, 0.88, 0.5, 1.0), (0.5, 0.0, 1.0, 0.12)],
     "yugioh": [(0.45, 0.55, 1.0, 0.68), (0.4, 0.88, 1.0, 1.0)],   # right-middle set code
+}
+
+# Title band, same card-relative coordinate system as OCR_REGIONS. The title
+# has sat top-left on every mainstream MTG frame since Alpha (1993), which is
+# what's actually been tuned here against a real scan batch (see
+# backend/tests/test_scanning.py). The other games default to the same
+# generic top band -- name position is standardized top-left across these
+# TCGs too -- but that hasn't been checked against real scans of them, so
+# treat it as a reasonable starting point rather than a verified fit.
+NAME_REGIONS = {
+    "mtg": [(0.05, 0.015, 0.90, 0.11)],
+    "pokemon": [(0.05, 0.02, 0.85, 0.11)],
+    "onepiece": [(0.05, 0.02, 0.85, 0.11)],
+    "yugioh": [(0.05, 0.02, 0.85, 0.11)],
 }
 
 # Extraction patterns, roughly ordered most-specific first.
@@ -97,9 +128,70 @@ def _configure_tesseract(db: Session) -> bool:
     return True
 
 
+def _locate_card(img) -> tuple[int, int, int, int]:
+    """Bounding box (l, t, r, b) of the physical card within a raw scan.
+
+    Flatbed scans sit inside a scanner-bed background that's fairly uniform
+    in a given corner but placed a few percent off-edge each time. Detected
+    by sampling the four corners as the background color and walking inward
+    from the mid-row/mid-column until the color departs from it. Falls back
+    to the full image when the corners don't look like a uniform mat (e.g. a
+    full-bleed/borderless crop already) or the detected box looks wrong.
+    """
+    w, h = img.size
+    full = (0, 0, w, h)
+    gray = img.convert("L")
+    px = gray.load()
+    corners = [px[2, 2], px[w - 3, 2], px[2, h - 3], px[w - 3, h - 3]]
+    if max(corners) - min(corners) > 20:
+        return full  # corners disagree too much to be a uniform mat
+    bg = sum(corners) / len(corners)
+    thresh = 12
+
+    def is_bg(x, y):
+        return abs(px[x, y] - bg) <= thresh
+
+    midy, midx = h // 2, w // 2
+    left = next((x for x in range(w) if not is_bg(x, midy)), 0)
+    right = next((x for x in range(w - 1, -1, -1) if not is_bg(x, midy)), w - 1)
+    top = next((y for y in range(h) if not is_bg(midx, y)), 0)
+    bottom = next((y for y in range(h - 1, -1, -1) if not is_bg(midx, y)), h - 1)
+    if right - left < w * 0.5 or bottom - top < h * 0.5:
+        return full  # detection went wrong; don't trust an implausible box
+    return (left, top, right + 1, bottom + 1)
+
+
+def _ocr_regions(img, bbox, regions: list, psm: int = 6) -> str | None:
+    """OCR each (l, t, r, b) card-fraction region and join the results.
+
+    Returns None (rather than partial text) if tesseract itself fails, so
+    callers can distinguish "tesseract broken" from "ran fine, found nothing".
+    """
+    bl, bt, br, bb = bbox
+    bw, bh = br - bl, bb - bt
+    texts = []
+    for (l, t, r, b) in regions:
+        crop = img.crop((bl + int(l * bw), bt + int(t * bh),
+                         bl + int(r * bw), bt + int(b * bh)))
+        crop = crop.resize((crop.width * 2, crop.height * 2))
+        try:
+            texts.append(pytesseract.image_to_string(crop, config=f"--psm {psm}"))
+        except Exception as e:  # tesseract missing/broken at runtime
+            log.warning("tesseract failed: %s", e)
+            return None
+    return "\n".join(texts)
+
+
 def ocr_extract(db: Session, image_path: str, game: str) -> dict:
-    """OCR the game-specific regions; return {set_code, number, raw, language, ok}."""
-    result = {"set_code": None, "number": None, "raw": "", "language": None, "ok": False}
+    """OCR the game-specific regions.
+
+    Returns {set_code, number, raw, name_raw, language, ok}. ``ok`` reflects
+    only the set-code/collector-number read (the historical contract of this
+    function); ``name_raw`` is populated independently whenever a title band
+    is defined for the game and OCR found anything there.
+    """
+    result = {"set_code": None, "number": None, "raw": "", "name_raw": None,
+              "language": None, "ok": False}
     if Image is None or not _configure_tesseract(db):
         return result
     try:
@@ -107,18 +199,19 @@ def ocr_extract(db: Session, image_path: str, game: str) -> dict:
     except Exception as e:
         log.warning("cannot open %s: %s", image_path, e)
         return result
-    w, h = img.size
-    texts = []
-    for (l, t, r, b) in OCR_REGIONS.get(game, [(0, 0.85, 1, 1)]):
-        crop = img.crop((int(l * w), int(t * h), int(r * w), int(b * h)))
-        crop = crop.resize((crop.width * 2, crop.height * 2))
-        try:
-            texts.append(pytesseract.image_to_string(crop, config="--psm 6"))
-        except Exception as e:  # tesseract missing/broken at runtime
-            log.warning("tesseract failed: %s", e)
-            return result
-    raw = "\n".join(texts)
+    bbox = _locate_card(img)
+
+    raw = _ocr_regions(img, bbox, OCR_REGIONS.get(game, [(0, 0.85, 1, 1)]))
+    if raw is None:
+        return result
     result["raw"] = raw
+
+    name_regions = NAME_REGIONS.get(game)
+    if name_regions:
+        name_text = _ocr_regions(img, bbox, name_regions)
+        if name_text and name_text.strip():
+            result["name_raw"] = name_text.strip()
+
     for lang, rx in LANG_HINTS.items():
         if rx.search(raw):
             result["language"] = lang
@@ -174,6 +267,37 @@ def lookup_by_ocr(db: Session, game: str, set_code: str | None,
     return db.execute(q.limit(25)).scalars().all()
 
 
+def lookup_by_name(db: Session, game: str, name_raw: str | None,
+                   min_len: int = 3, max_len: int = 60) -> list[CatalogCard]:
+    """Catalog rows whose name is (very likely) what the title-band OCR read.
+
+    The title crop also catches mana-cost symbols etc., so the OCR text is
+    usually the real name plus trailing junk rather than an exact match.
+    Rather than an exact-equality lookup (breaks on any junk) or a full-table
+    fuzzy scan (too slow against a catalog with hundreds of thousands of
+    printings), generate every prefix of the normalized OCR text up to
+    `max_len` and look those up with a single indexed IN query -- the real
+    name, if OCR got it right, is one of those prefixes.
+    """
+    norm = name_key(name_raw)
+    if not norm or len(norm) < min_len:
+        return []
+    prefixes = [norm[:i] for i in range(min_len, min(len(norm), max_len) + 1)]
+    rows = db.execute(
+        select(CatalogCard).where(
+            CatalogCard.game == game, CatalogCard.is_sealed == False,  # noqa: E712
+            CatalogCard.name_norm.in_(prefixes),
+        )
+    ).scalars().all()
+    if not rows:
+        return []
+    # Prefer the longest matching name: a short catalog name that happens to
+    # be a prefix of a longer one (or of OCR junk) is the coincidence to
+    # avoid, not the signal to trust.
+    best_len = max(len(c.name_norm) for c in rows)
+    return [c for c in rows if len(c.name_norm) == best_len]
+
+
 def compute_phash(image_path: str) -> str | None:
     if Image is None or imagehash is None:
         return None
@@ -185,8 +309,17 @@ def compute_phash(image_path: str) -> str | None:
 
 
 def phash_candidates(db: Session, image_path: str, game: str | None,
-                     max_distance: int, top_n: int = 5) -> list[tuple[CatalogCard, int]]:
-    """Compare scan phash against catalog phashes; return (card, distance) top-N."""
+                     max_distance: int, top_n: int = 5,
+                     card_ids: set[int] | None = None,
+                     set_code: str | None = None) -> list[tuple[CatalogCard, int]]:
+    """Compare scan phash against catalog phashes; return (card, distance) top-N.
+
+    ``card_ids`` (preferred) or ``set_code`` scope the comparison pool to
+    candidates already narrowed by OCR, so a hash only has to disambiguate a
+    handful of prints instead of the whole catalog -- fewer chances for an
+    accidental hash collision, and faster. Omit both for the old unscoped
+    full-catalog sweep.
+    """
     if imagehash is None:
         return []
     scan_hash_s = compute_phash(image_path)
@@ -197,6 +330,10 @@ def phash_candidates(db: Session, image_path: str, game: str | None,
                                   CatalogCard.is_sealed == False)  # noqa: E712
     if game:
         q = q.where(CatalogCard.game == game)
+    if card_ids is not None:
+        q = q.where(CatalogCard.id.in_(card_ids))
+    elif set_code:
+        q = q.where(CatalogCard.set_code == set_code)
     scored = []
     for card in db.execute(q).scalars():
         try:
@@ -268,33 +405,67 @@ def _candidate_dict(card: CatalogCard, score: float, method: str) -> dict:
 
 
 def recognize_image(db: Session, image_path: str, game: str) -> dict:
-    """Run the full recognition pipeline on one image."""
+    """Run the full recognition pipeline on one image.
+
+    Tiered so each stage narrows rather than replaces the last:
+    1. Title-band OCR -> name matches (possibly many, if reprinted).
+    2. Collector-number/set-code OCR -> a specific printing, cross-narrowed
+       against (1) when both hit (never *less* trusted than (1) alone).
+    3. If (2) didn't resolve it: perceptual hash, scoped to (1)'s name
+       matches, or to (2)'s set code if there was no name match, so the hash
+       only has to pick among a handful of prints. Retried unscoped if the
+       scoped pool comes up empty, so a bad OCR read can't leave a scan worse
+       off than before this narrowing existed.
+    """
     phash_max = int(get_setting(db, "phash_max_distance"))
     candidates: list[dict] = []
     method = None
     confidence = 0.0
-    language = None
 
     ocr = ocr_extract(db, image_path, game)
+    language = ocr["language"]
+
+    name_matches = lookup_by_name(db, game, ocr["name_raw"])
+
+    numset_matches = []
     if ocr["ok"]:
-        matches = lookup_by_ocr(db, game, ocr["set_code"], ocr["number"])
-        language = ocr["language"]
-        if matches:
-            method = "ocr"
-            # Unique exact match with set code = high confidence
-            confidence = 0.95 if (len(matches) == 1 and ocr["set_code"]) else \
-                0.8 if len(matches) == 1 else 0.6
-            candidates = [_candidate_dict(m, confidence if i == 0 else 0.5, "ocr")
-                          for i, m in enumerate(matches[:10])]
+        numset_matches = lookup_by_ocr(db, game, ocr["set_code"], ocr["number"])
+        if numset_matches and name_matches:
+            name_ids = {c.id for c in name_matches}
+            narrowed = [c for c in numset_matches if c.id in name_ids]
+            if narrowed:
+                numset_matches = narrowed
+
+    if numset_matches:
+        method = "ocr"
+        # Unique exact match with set code = high confidence
+        confidence = 0.95 if (len(numset_matches) == 1 and ocr["set_code"]) else \
+            0.8 if len(numset_matches) == 1 else 0.6
+        candidates = [_candidate_dict(m, confidence if i == 0 else 0.5, "ocr")
+                      for i, m in enumerate(numset_matches[:10])]
+    elif len(name_matches) == 1:
+        # Number/set OCR didn't pin a print, but the name is unique across
+        # this game's *entire* catalog (no reprints) -- as good as a print id.
+        method = "ocr_name"
+        confidence = 0.7
+        candidates = [_candidate_dict(name_matches[0], confidence, "ocr_name")]
 
     if not candidates:
-        ph = phash_candidates(db, image_path, game, phash_max)
+        name_ids = {c.id for c in name_matches} if name_matches else None
+        scope_set_code = ocr["set_code"] if not name_ids else None
+        ph = phash_candidates(db, image_path, game, phash_max,
+                              card_ids=name_ids, set_code=scope_set_code)
+        scoped = bool(name_ids or scope_set_code)
+        if not ph and scoped:
+            ph = phash_candidates(db, image_path, game, phash_max)
+            scoped = False
         if ph:
-            method = "phash"
+            method = "phash_name" if (scoped and name_ids) else \
+                "phash_set" if scoped else "phash"
             best_d = ph[0][1]
             confidence = max(0.0, 1.0 - best_d / 20.0)
             candidates = [
-                _candidate_dict(card, max(0.0, 1.0 - d / 20.0), "phash")
+                _candidate_dict(card, max(0.0, 1.0 - d / 20.0), method)
                 for card, d in ph
             ]
 

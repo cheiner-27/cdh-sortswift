@@ -7,6 +7,8 @@ Design constraints honored here (see REQUIREMENTS.md):
 - Staging as a soft landing zone: StagingItem is distinct from InventoryItem.
 - No file mutation: ProcessedScan tracks SHA-256 hashes; files never move.
 """
+import re
+import unicodedata
 from datetime import datetime, timezone
 
 from sqlalchemy import (
@@ -37,6 +39,23 @@ def collector_number_key(value: str | None) -> str | None:
         return None
     head = value.split("/")[0].strip()
     return str(int(head)) if head.isdigit() else head.upper()
+
+
+def name_key(value: str | None) -> str | None:
+    """Canonical matching key for a card name (see collector_number_key).
+
+    OCR of the title band routinely drags in trailing junk from the mana-cost
+    symbols sharing the crop (e.g. "Riverchurn Monument" -> "Riverchurn
+    Monument 1 (blue drop)") and mangles accents ("Dandân" -> "Dandan" or
+    worse). Reducing to lowercase ASCII alphanumerics lets recognition do an
+    indexed prefix lookup (the real name is almost always a prefix of the
+    noisy OCR text) instead of an exact match that trailing junk would break.
+    """
+    if not value:
+        return None
+    value = unicodedata.normalize("NFKD", value).encode("ascii", "ignore").decode()
+    key = re.sub(r"[^a-z0-9]", "", value.lower())
+    return key or None
 
 
 # ---------------------------------------------------------------------------
@@ -75,6 +94,8 @@ class CatalogCard(Base):
     # numerator-only matching key (see collector_number_key); powers OCR lookup
     collector_number_norm: Mapped[str | None] = mapped_column(String, index=True, nullable=True)
     name: Mapped[str] = mapped_column(String, index=True)
+    # OCR name-matching key (see name_key); powers the name-first recognition tier
+    name_norm: Mapped[str | None] = mapped_column(String, index=True, nullable=True)
     rarity: Mapped[str | None] = mapped_column(String, nullable=True)
     finishes: Mapped[list] = mapped_column(JSON, default=list)  # canonical printing types available
     languages: Mapped[list] = mapped_column(JSON, default=list)
@@ -89,6 +110,7 @@ class CatalogCard(Base):
         UniqueConstraint("game", "external_id"),
         Index("ix_cards_set_num", "game", "set_code", "collector_number"),
         Index("ix_cards_game_numnorm", "game", "collector_number_norm"),
+        Index("ix_cards_game_namenorm", "game", "name_norm"),
     )
 
 
