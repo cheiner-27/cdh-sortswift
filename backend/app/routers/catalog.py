@@ -1,6 +1,8 @@
 """Catalog: search, sets, sync triggers, price feed."""
+import threading
+
 from fastapi import APIRouter, Body, Depends, HTTPException, UploadFile
-from sqlalchemy import Integer, case, cast, or_, select
+from sqlalchemy import Integer, case, cast, func, or_, select
 from sqlalchemy.orm import Session
 
 from ..db import get_db
@@ -10,6 +12,10 @@ from ..services import scanning
 from .serializers import card_dict
 
 router = APIRouter(prefix="/api/catalog", tags=["catalog"])
+
+# In-memory status of the background whole-catalog phash build, per game.
+_PHASH_BUILD: dict[str, dict] = {}
+_PHASH_LOCK = threading.Lock()
 
 
 @router.get("/search")
@@ -185,9 +191,84 @@ async def upload_prices_csv(file: UploadFile, db: Session = Depends(get_db)):
 
 @router.post("/phash/build")
 def build_phashes(payload: dict = Body(...), db: Session = Depends(get_db)):
+    """Build reference phashes for one set (or a capped slice) inline.
+
+    Only cards missing a phash are fetched, so re-running never redoes work.
+    For the whole catalog use /phash/build-all (a background job) instead — an
+    inline whole-game build would exceed the request timeout.
+    """
     game = payload.get("game")
     if not game:
         raise HTTPException(400, "game required")
     n = scanning.build_catalog_phashes(
         db, game, payload.get("set_code"), payload.get("limit"))
     return {"built": n}
+
+
+@router.get("/phash/coverage")
+def phash_coverage(game: str, db: Session = Depends(get_db)):
+    """Per-set phash coverage for a game: buildable cards (non-sealed, with an
+    image) vs how many are already hashed. Least-covered sets first."""
+    rows = db.execute(
+        select(
+            CatalogCard.set_code,
+            func.count().label("cards"),
+            func.sum(case((CatalogCard.phash.isnot(None), 1), else_=0)).label("hashed"),
+        )
+        .where(CatalogCard.game == game, CatalogCard.is_sealed == False,  # noqa: E712
+               CatalogCard.image_url.isnot(None))
+        .group_by(CatalogCard.set_code)
+    ).all()
+    names = {s.code: s.name for s in db.execute(
+        select(CatalogSet).where(CatalogSet.game == game)).scalars()}
+    sets = []
+    for set_code, cards, hashed in rows:
+        hashed = int(hashed or 0)
+        sets.append({"set_code": set_code, "set_name": names.get(set_code, ""),
+                     "cards": cards, "hashed": hashed,
+                     "pct": round(100 * hashed / cards) if cards else 0})
+    sets.sort(key=lambda r: (r["pct"], -r["cards"]))
+    total = sum(r["cards"] for r in sets)
+    hashed = sum(r["hashed"] for r in sets)
+    return {"game": game, "total": total, "hashed": hashed,
+            "pct": round(100 * hashed / total) if total else 0,
+            "sets": sets, "build": _PHASH_BUILD.get(game)}
+
+
+@router.post("/phash/build-all")
+def build_all_phashes(payload: dict = Body(...)):
+    """Kick off a background build of every missing phash for a game. Returns
+    immediately; poll /phash/coverage (or /phash/build-status) for progress.
+    Idempotent: already-hashed cards are skipped."""
+    game = payload.get("game")
+    if not game:
+        raise HTTPException(400, "game required")
+    with _PHASH_LOCK:
+        st = _PHASH_BUILD.get(game)
+        if st and st.get("running"):
+            return {"status": "already_running", **st}
+
+        from ..db import SessionLocal
+        s = SessionLocal()
+        total = s.query(CatalogCard).filter(
+            CatalogCard.game == game, CatalogCard.phash.is_(None),
+            CatalogCard.image_url.isnot(None), CatalogCard.is_sealed == False).count()
+        _PHASH_BUILD[game] = {"running": True, "built": 0, "total": total, "error": None}
+
+    def worker():
+        try:
+            scanning.build_catalog_phashes(
+                s, game, progress=lambda built: _PHASH_BUILD[game].update(built=built))
+        except Exception as e:  # pragma: no cover
+            _PHASH_BUILD[game]["error"] = str(e)
+        finally:
+            _PHASH_BUILD[game]["running"] = False
+            s.close()
+
+    threading.Thread(target=worker, daemon=True).start()
+    return {"status": "started", **_PHASH_BUILD[game]}
+
+
+@router.get("/phash/build-status")
+def phash_build_status(game: str):
+    return _PHASH_BUILD.get(game) or {"running": False, "built": 0, "total": 0, "error": None}

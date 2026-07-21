@@ -38,9 +38,11 @@ log = logging.getLogger(__name__)
 SUPPORTED_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp"}
 
 try:
-    from PIL import Image
+    from PIL import Image, ImageOps, ImageFilter
 except ImportError:  # pragma: no cover
     Image = None
+    ImageOps = None
+    ImageFilter = None
 
 try:
     import imagehash
@@ -109,6 +111,66 @@ LANG_HINTS = {
     "ko": re.compile(r"[가-힯]"),
     "zhs": re.compile(r"[一-鿿]"),
 }
+
+# --- MTG collector-layout parser ------------------------------------------
+# Modern MTG prints its collector info as two lines at the bottom-left, in one
+# of two layouts: "123/456 R" then "SET • EN ARTIST" (2015-2023), or "R 0057"
+# then "SET • EN ARTIST" (2024+). The bullet between the set code and the
+# 2-letter language OCRs as almost anything (* . o c ° © ¢ : + ® ...), so we
+# match the separator as a short run of non-alphanumerics. A rarity letter
+# (C/U/R/M/L/S/P/T) sits next to the number. Older cards (pre-2003) print no
+# set code at all -- only a copyright year -- which is why the number is only
+# ever trusted when it sits on the line directly above a detected set line
+# (a bare year like "1997" must never be mistaken for a collector number).
+MTG_RARITY = "CURMLSPT"
+MTG_SET_LINE = re.compile(r"\b([A-Z0-9]{2,5})\s*[^\sA-Za-z0-9]{1,4}\s*([A-Z]{2})\b")
+MTG_FRACTION = re.compile(r"\b(\d{1,4})\s*/\s*\d{1,4}\b")
+MTG_YEAR = re.compile(r"((?:19|20)\d{2})\b")
+
+# Non-standard printings to push DOWN when breaking a same-name reprint tie
+# (foreign black-border, gold-bordered / world-championship, promo sets,
+# starred or lettered variant collector numbers) so the ordinary English
+# expansion printing wins by default.
+_MTG_FOREIGN = {"4BB", "FBB"}
+_MTG_GOLD_WC = re.compile(r"^(WC\d\d|PWC|30A|30B|PTC)$")
+
+
+def _mtg_extract_number(line_above: str) -> str | None:
+    """Collector number from the line directly above a detected set line."""
+    if not line_above:
+        return None
+    m = MTG_FRACTION.search(line_above)
+    if m:
+        return str(int(m.group(1)))
+    cleaned = re.sub(rf"\b[{MTG_RARITY}]\b", " ", line_above)
+    nums = re.findall(r"\d{1,4}", cleaned)
+    for n in nums:                       # a leading-zero number is never a year
+        if n.startswith("0"):
+            return str(int(n))
+    for n in nums:                       # else any 1-4 digit that isn't a year
+        if not (len(n) == 4 and n[0] in "12"):
+            return str(int(n))
+    return None
+
+
+def _mtg_parse_bottom(text: str) -> dict:
+    """Extract set_code / number / year / language from bottom-band OCR text."""
+    out = {"set_code": None, "number": None, "year": None, "language": None}
+    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+    set_idx = None
+    for i, ln in enumerate(lines):
+        m = MTG_SET_LINE.search(ln)
+        if m:
+            out["set_code"] = m.group(1).upper()
+            out["language"] = m.group(2).upper()
+            set_idx = i
+            break
+    if set_idx is not None and set_idx > 0:
+        out["number"] = _mtg_extract_number(lines[set_idx - 1])
+    ym = MTG_YEAR.search(text)
+    if ym:
+        out["year"] = int(ym.group(1))
+    return out
 
 
 def sha256_file(path: Path) -> str:
@@ -182,16 +244,72 @@ def _ocr_regions(img, bbox, regions: list, psm: int = 6) -> str | None:
     return "\n".join(texts)
 
 
-def ocr_extract(db: Session, image_path: str, game: str) -> dict:
-    """OCR the game-specific regions.
+def _ocr_one(crop, psm: int) -> str:
+    try:
+        return pytesseract.image_to_string(crop, config=f"--psm {psm}").strip()
+    except Exception as e:  # tesseract missing/broken at runtime
+        log.warning("tesseract failed: %s", e)
+        return ""
 
-    Returns {set_code, number, raw, name_raw, language, ok}. ``ok`` reflects
-    only the set-code/collector-number read (the historical contract of this
-    function); ``name_raw`` is populated independently whenever a title band
-    is defined for the game and OCR found anything there.
+
+def _rel_box(bbox, box):
+    bl, bt, br, bb = bbox
+    bw, bh = br - bl, bb - bt
+    l, t, r, b = box
+    return (int(bl + l * bw), int(bt + t * bh), int(bl + r * bw), int(bt + b * bh))
+
+
+def _name_ocr_candidates(img, bbox) -> list[str]:
+    """Several OCR reads of the title band; the caller keeps whichever matches
+    the catalog best. Simple grayscale upscaling beats aggressive preprocessing
+    here (the band also holds art/background that autocontrast+sharpen wreck),
+    so we mainly vary the crop box and page-segmentation mode."""
+    cands = []
+    for box in ((0.04, 0.015, 0.92, 0.115), (0.03, 0.02, 0.98, 0.10),
+                (0.05, 0.03, 0.75, 0.10)):
+        crop = img.crop(_rel_box(bbox, box))
+        crop = crop.resize((crop.width * 3, crop.height * 3))
+        for psm in (7, 6):
+            t = _ocr_one(crop, psm)
+            if t:
+                cands.append(t)
+        if ImageOps is not None:
+            t = _ocr_one(ImageOps.autocontrast(crop), 7)
+            if t:
+                cands.append(t)
+    seen, out = set(), []
+    for c in cands:
+        if c not in seen:
+            seen.add(c)
+            out.append(c)
+    return out
+
+
+def _mtg_bottom_text(img, bbox) -> str:
+    """Full-width bottom strip + bottom-left corner (centered / middle-spanning
+    collector text needs the full width, not just the corner)."""
+    parts = []
+    for box in ((0.0, 0.88, 1.0, 1.0), (0.0, 0.90, 0.60, 1.0)):
+        crop = img.crop(_rel_box(bbox, box))
+        crop = crop.resize((crop.width * 3, crop.height * 3))
+        if ImageOps is not None:
+            crop = ImageOps.autocontrast(crop)
+        if ImageFilter is not None:
+            crop = crop.filter(ImageFilter.SHARPEN)
+        parts.append(_ocr_one(crop, 6))
+    return "\n".join(parts)
+
+
+def ocr_extract(db: Session, image_path: str, game: str) -> dict:
+    """OCR the card for name / set code / collector number / copyright year.
+
+    Returns {set_code, number, raw, name_raw, name_candidates, year, language,
+    ok}. ``ok`` marks a trustworthy set-code+number read. MTG uses the modern
+    collector-layout parser and multi-read title OCR; the other games keep the
+    region/pattern extraction they were tuned with.
     """
     result = {"set_code": None, "number": None, "raw": "", "name_raw": None,
-              "language": None, "ok": False}
+              "name_candidates": [], "year": None, "language": None, "ok": False}
     if Image is None or not _configure_tesseract(db):
         return result
     try:
@@ -201,17 +319,34 @@ def ocr_extract(db: Session, image_path: str, game: str) -> dict:
         return result
     bbox = _locate_card(img)
 
+    if game == "mtg":
+        cands = _name_ocr_candidates(img, bbox)
+        result["name_candidates"] = cands
+        result["name_raw"] = cands[0] if cands else None
+        bottom = _mtg_bottom_text(img, bbox)
+        result["raw"] = bottom
+        parsed = _mtg_parse_bottom(bottom)
+        result.update(set_code=parsed["set_code"], number=parsed["number"],
+                      year=parsed["year"], language=parsed["language"])
+        for lang, rx in LANG_HINTS.items():
+            if rx.search(bottom):
+                result["language"] = lang
+                break
+        result["ok"] = bool(result["number"] and result["set_code"])
+        img.close()
+        return result
+
     raw = _ocr_regions(img, bbox, OCR_REGIONS.get(game, [(0, 0.85, 1, 1)]))
     if raw is None:
+        img.close()
         return result
     result["raw"] = raw
-
     name_regions = NAME_REGIONS.get(game)
     if name_regions:
         name_text = _ocr_regions(img, bbox, name_regions)
         if name_text and name_text.strip():
             result["name_raw"] = name_text.strip()
-
+            result["name_candidates"] = [name_text.strip()]
     for lang, rx in LANG_HINTS.items():
         if rx.search(raw):
             result["language"] = lang
@@ -227,14 +362,7 @@ def ocr_extract(db: Session, image_path: str, game: str) -> dict:
         elif game == "yugioh":
             result["number"] = m.group(0).upper()
             result["set_code"] = groups[0].upper()
-        elif game == "mtg":
-            nums = [g for g in groups if g.isdigit()]
-            alphas = [g for g in groups if not g.isdigit()]
-            if nums:
-                result["number"] = str(int(nums[0]))
-            if alphas:
-                result["set_code"] = alphas[0].upper()
-        elif game == "pokemon":
+        else:  # pokemon
             nums = [g for g in groups if g.isdigit()]
             alphas = [g for g in groups if not g.isdigit()]
             if nums:
@@ -244,6 +372,7 @@ def ocr_extract(db: Session, image_path: str, game: str) -> dict:
         result["ok"] = bool(result["number"])
         if result["ok"]:
             break
+    img.close()
     return result
 
 
@@ -347,8 +476,13 @@ def phash_candidates(db: Session, image_path: str, game: str | None,
 
 
 def build_catalog_phashes(db: Session, game: str, set_code: str | None = None,
-                          limit: int | None = None) -> int:
+                          limit: int | None = None, progress=None) -> int:
     """Download catalog reference images and store their phashes (opt-in, slow).
+
+    Only builds cards that don't already have a phash (``phash IS NULL``), so
+    it's always safe to re-run -- it never redoes work. ``progress`` is an
+    optional ``callback(built_count)`` invoked periodically so a background
+    whole-catalog build can report how far along it is.
 
     Uses the shared rate-limited client so image fetches carry a descriptive
     User-Agent — Scryfall's CDN 400s the default httpx User-Agent, which is
@@ -380,7 +514,11 @@ def build_catalog_phashes(db: Session, game: str, set_code: str | None = None,
                 log.warning("phash build failed for %s: %s", card.name, e)
             if n and n % 100 == 0:
                 db.commit()
+                if progress:
+                    progress(n)
     db.commit()
+    if progress:
+        progress(n)
     return n
 
 
@@ -404,73 +542,170 @@ def _candidate_dict(card: CatalogCard, score: float, method: str) -> dict:
     }
 
 
-def recognize_image(db: Session, image_path: str, game: str) -> dict:
-    """Run the full recognition pipeline on one image.
+def _best_name_matches(db: Session, game: str, candidates: list[str]) -> list[CatalogCard]:
+    """Best same-name printings across several OCR title reads: the read whose
+    matched catalog name is the longest (most specific real card name)."""
+    best, best_len = [], 0
+    for cand in candidates or []:
+        rows = lookup_by_name(db, game, cand)
+        if rows and len(rows[0].name_norm or "") > best_len:
+            best_len = len(rows[0].name_norm or "")
+            best = rows
+    return best
 
-    Tiered so each stage narrows rather than replaces the last:
-    1. Title-band OCR -> name matches (possibly many, if reprinted).
-    2. Collector-number/set-code OCR -> a specific printing, cross-narrowed
-       against (1) when both hit (never *less* trusted than (1) alone).
-    3. If (2) didn't resolve it: perceptual hash, scoped to (1)'s name
-       matches, or to (2)'s set code if there was no name match, so the hash
-       only has to pick among a handful of prints. Retried unscoped if the
-       scoped pool comes up empty, so a bad OCR read can't leave a scan worse
-       off than before this narrowing existed.
+
+def _release_year(card: CatalogCard) -> int | None:
+    rd = card.release_date
+    if rd and len(rd) >= 4 and rd[:4].isdigit():
+        return int(rd[:4])
+    return None
+
+
+def _prefer_standard(cards: list[CatalogCard]) -> list[CatalogCard]:
+    """Order same-name candidates so the ordinary English expansion printing
+    beats foreign-black-border / gold / world-championship / promo / variant
+    printings when nothing else separates them."""
+    def rank(c):
+        s, sc, cn = 0, c.set_code or "", c.collector_number or ""
+        if sc in _MTG_FOREIGN:
+            s += 4
+        if _MTG_GOLD_WC.match(sc):
+            s += 4
+        if sc.startswith("P") and len(sc) > 3:
+            s += 2
+        if "★" in cn or cn.endswith(("s", "p")):
+            s += 2
+        return s
+    return sorted(cards, key=rank)
+
+
+def _card_crop_phash(image_path: str):
+    """phash of the *located card crop* of a scan -- matches the tight catalog
+    reference images far better than hashing the whole bordered flatbed scan."""
+    if Image is None or imagehash is None:
+        return None
+    try:
+        with Image.open(image_path) as img:
+            rgb = img.convert("RGB")
+            return imagehash.phash(rgb.crop(_locate_card(rgb)))
+    except Exception:
+        return None
+
+
+def _hamming_pool(scan_hash, cards):
+    scored = []
+    for c in cards:
+        if not c.phash:
+            continue
+        try:
+            scored.append((c, scan_hash - imagehash.hex_to_hash(c.phash)))
+        except (ValueError, TypeError):
+            continue
+    scored.sort(key=lambda x: x[1])
+    return scored
+
+
+def _hamming_unscoped(db: Session, scan_hash, game: str, cap: int):
+    q = select(CatalogCard).where(CatalogCard.game == game,
+                                  CatalogCard.phash.isnot(None),
+                                  CatalogCard.is_sealed == False)  # noqa: E712
+    scored = []
+    for c in db.execute(q).scalars():
+        try:
+            d = scan_hash - imagehash.hex_to_hash(c.phash)
+        except (ValueError, TypeError):
+            continue
+        if d <= cap:
+            scored.append((c, d))
+    scored.sort(key=lambda x: x[1])
+    return scored
+
+
+def _conf_from_distance(d: int, base: float = 1.0, denom: float = 22.0) -> float:
+    return max(0.0, min(base, base * (1.0 - d / denom)))
+
+
+def recognize_image(db: Session, image_path: str, game: str) -> dict:
+    """Local recognition pipeline (no network). Tiered by reliability:
+
+    1. Printed set code + collector number -> exact printing (confidence 0.97).
+       For the rare multi-variant number, the card-crop phash picks among them.
+    2. Otherwise arbitrate by image: hash the located card crop and compare it
+       against BOTH the OCR-name/copyright-year scoped pool AND the whole
+       catalog, letting the closer hash win (a small slack favours the scoped
+       pool, since the name/year is a prior). This means a mis-read name never
+       short-circuits the image step -- if the scoped match is poor, the
+       unscoped match takes over.
+    3. Fallbacks when no reference phash exists: a unique catalog name, else a
+       low-confidence name/year guess.
+
+    Confidence is monotonic and meant to gate the manual cloud re-identify
+    step: printed set+number ~0.97; a corroborated scoped image match is mid;
+    an unscoped image-only guess is capped low.
     """
     phash_max = int(get_setting(db, "phash_max_distance"))
-    candidates: list[dict] = []
-    method = None
-    confidence = 0.0
-
     ocr = ocr_extract(db, image_path, game)
-    language = ocr["language"]
+    language = ocr.get("language")
+    name_cands = ocr.get("name_candidates") or (
+        [ocr["name_raw"]] if ocr.get("name_raw") else [])
 
-    name_matches = lookup_by_name(db, game, ocr["name_raw"])
+    # 1) printed set + number -> exact printing
+    numset = []
+    if ocr.get("number") and ocr.get("set_code"):
+        numset = lookup_by_ocr(db, game, ocr["set_code"], ocr["number"])
+    if numset:
+        if len(numset) == 1:
+            return {"candidates": [_candidate_dict(numset[0], 0.97, "ocr_setnum")],
+                    "method": "ocr_setnum", "confidence": 0.97, "language": language}
+        sh = _card_crop_phash(image_path)
+        scored = _hamming_pool(sh, numset) if sh is not None else []
+        if scored:
+            conf = min(0.9, _conf_from_distance(scored[0][1], base=0.9) + 0.3)
+            cands = [_candidate_dict(c, _conf_from_distance(d, base=0.9), "ocr_setnum")
+                     for c, d in scored[:10]]
+            return {"candidates": cands, "method": "ocr_setnum",
+                    "confidence": round(conf, 2), "language": language}
+        return {"candidates": [_candidate_dict(numset[0], 0.7, "ocr_setnum")],
+                "method": "ocr_setnum", "confidence": 0.7, "language": language}
 
-    numset_matches = []
-    if ocr["ok"]:
-        numset_matches = lookup_by_ocr(db, game, ocr["set_code"], ocr["number"])
-        if numset_matches and name_matches:
-            name_ids = {c.id for c in name_matches}
-            narrowed = [c for c in numset_matches if c.id in name_ids]
-            if narrowed:
-                numset_matches = narrowed
+    # 2) image arbitration over a name/year scoped pool vs the whole catalog
+    names = [c for c in _best_name_matches(db, game, name_cands)
+             if len(c.name_norm or "") >= 4]
+    scoped = names
+    if ocr.get("year") and names:
+        yr = [c for c in names if _release_year(c) == ocr["year"]]
+        if yr:
+            scoped = yr
+    scoped = _prefer_standard(scoped)
 
-    if numset_matches:
-        method = "ocr"
-        # Unique exact match with set code = high confidence
-        confidence = 0.95 if (len(numset_matches) == 1 and ocr["set_code"]) else \
-            0.8 if len(numset_matches) == 1 else 0.6
-        candidates = [_candidate_dict(m, confidence if i == 0 else 0.5, "ocr")
-                      for i, m in enumerate(numset_matches[:10])]
-    elif len(name_matches) == 1:
-        # Number/set OCR didn't pin a print, but the name is unique across
-        # this game's *entire* catalog (no reprints) -- as good as a print id.
-        method = "ocr_name"
-        confidence = 0.7
-        candidates = [_candidate_dict(name_matches[0], confidence, "ocr_name")]
+    sh = _card_crop_phash(image_path)
+    scoped_scored = _hamming_pool(sh, scoped) if (sh is not None and scoped) else []
+    unscoped = _hamming_unscoped(db, sh, game, max(phash_max, 18)) if sh is not None else []
 
-    if not candidates:
-        name_ids = {c.id for c in name_matches} if name_matches else None
-        scope_set_code = ocr["set_code"] if not name_ids else None
-        ph = phash_candidates(db, image_path, game, phash_max,
-                              card_ids=name_ids, set_code=scope_set_code)
-        scoped = bool(name_ids or scope_set_code)
-        if not ph and scoped:
-            ph = phash_candidates(db, image_path, game, phash_max)
-            scoped = False
-        if ph:
-            method = "phash_name" if (scoped and name_ids) else \
-                "phash_set" if scoped else "phash"
-            best_d = ph[0][1]
-            confidence = max(0.0, 1.0 - best_d / 20.0)
-            candidates = [
-                _candidate_dict(card, max(0.0, 1.0 - d / 20.0), method)
-                for card, d in ph
-            ]
+    slack = 4  # name/year prior: let the scoped pool win if it's this close
+    if scoped_scored and (not unscoped or scoped_scored[0][1] <= unscoped[0][1] + slack):
+        base = 0.85 if names else 0.7
+        conf = _conf_from_distance(scoped_scored[0][1], base=base)
+        cands = [_candidate_dict(c, _conf_from_distance(d, base=0.85), "img_scoped")
+                 for c, d in scoped_scored[:10]]
+        return {"candidates": cands, "method": "img_scoped",
+                "confidence": round(conf, 2), "language": language}
+    if unscoped:
+        conf = _conf_from_distance(unscoped[0][1], base=0.6)
+        cands = [_candidate_dict(c, _conf_from_distance(d, base=0.6), "img_unscoped")
+                 for c, d in unscoped[:10]]
+        return {"candidates": cands, "method": "img_unscoped",
+                "confidence": round(conf, 2), "language": language}
 
-    return {"candidates": candidates, "method": method,
-            "confidence": confidence, "language": language}
+    # 3) no reference phash: unique-name, else a weak name/year guess
+    if len(names) == 1:
+        return {"candidates": [_candidate_dict(names[0], 0.7, "ocr_name")],
+                "method": "ocr_name", "confidence": 0.7, "language": language}
+    if scoped:
+        cands = [_candidate_dict(c, 0.35, "name_year") for c in scoped[:10]]
+        return {"candidates": cands, "method": "name_year",
+                "confidence": 0.35, "language": language}
+    return {"candidates": [], "method": None, "confidence": 0.0, "language": language}
 
 
 # Trailing OS duplicate-suffix, e.g. "...0007F (1).jpg" -> ignored when

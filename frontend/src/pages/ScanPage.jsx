@@ -123,6 +123,33 @@ export default function ScanPage() {
     } catch (e) { err(e) }
   }
 
+  // Select the scans worth a second (cloud) look: no match at all, or a
+  // genuinely low-confidence one. Deliberately NOT every needs_review row —
+  // decent image matches (~0.4-0.7) are better left alone; on the test batches
+  // handing those to the cloud lowered accuracy. The threshold is a setting.
+  const autoSelectUncertain = () => {
+    const thr = settings?.reeval_auto_select_below ?? 0.4
+    setSelected(new Set(shown
+      .filter((i) => !i.card || i.confidence < thr)
+      .map((i) => i.id)))
+  }
+
+  // Manual, opt-in: send ONLY the selected scans to the cloud vision model for
+  // a second opinion (the automatic pipeline never calls out).
+  const [reeval, setReeval] = useState(false)
+  const reidentifySelected = async () => {
+    const ids = [...selected]
+    if (!ids.length) return
+    setReeval(true)
+    try {
+      const res = await api.post('/api/scans/queue/reeval', { ids })
+      const byId = Object.fromEntries((res.updated || []).map((u) => [u.id, u]))
+      setItems((list) => list.map((i) => byId[i.id] || i))
+      const failed = res.errors?.length ? `, ${res.errors.length} failed` : ''
+      ok(`Re-identified ${res.updated?.length || 0} card(s) with AI${failed}`)
+    } catch (e) { err(e) } finally { setReeval(false) }
+  }
+
   const confirmOne = async (item) => {
     try {
       await api.post(`/api/scans/queue/${item.id}/confirm`)
@@ -234,6 +261,13 @@ export default function ScanPage() {
 
           <div className="row center">
             <span className="muted">{selected.size} selected</span>
+            <button className="small" onClick={autoSelectUncertain}
+              title="Select scans with no match, flagged for review, or below the re-eval confidence threshold">
+              Auto-select uncertain</button>
+            <button className="small" disabled={!selected.size || reeval} onClick={reidentifySelected}
+              title="Send ONLY the selected scans to the cloud vision model (gpt-5.2) for a second opinion. Nothing is sent automatically.">
+              {reeval ? 'Re-identifying…' : '🔍 Re-identify with AI'}</button>
+            <span style={{ borderLeft: '1px solid var(--border)', height: 20 }} />
             <select onChange={(e) => setBulkVals({ ...bulkVals, condition: e.target.value })} defaultValue="">
               <option value="" disabled>condition…</option>
               {meta.conditions.map((c) => <option key={c}>{c}</option>)}</select>

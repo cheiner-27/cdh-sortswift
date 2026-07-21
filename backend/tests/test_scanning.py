@@ -106,85 +106,117 @@ def test_lookup_by_name_short_or_missing_text_returns_nothing(db):
     assert scanning.lookup_by_name(db, "mtg", "  Fo ") == []  # below min_len
 
 
-def test_recognize_image_prefers_numset_over_name(db, monkeypatch):
+# --- MTG collector-layout parser (the two-line modern layout + bullet noise) ---
+
+@pytest.mark.parametrize("text, set_code, number", [
+    # 2024+ layout: "R 0012" then "SET <bullet> EN ARTIST"; bullet OCRs as '*'
+    ("R 0012\nTLA * EN AINEZU", "TLA", "12"),
+    # 2015-2023 layout: fraction + rarity, then set line; bullet as '¢'
+    ("015/281 M\nSNC ¢ EN ANASTASIA", "SNC", "15"),
+    ("234/342 R\nC15 ° EN KARLA ORTIZ", "C15", "234"),
+    ("492 U\nCLB*EN JOSH HASS", "CLB", "492"),        # no spaces around bullet
+    ("R 0198\nMOM*:+EN DAARKEN", "MOM", "198"),        # multi-char bullet run
+    ("268 R\nSLD © EN DOMINIK MAYER", "SLD", "268"),   # copyright glyph as bullet
+])
+def test_mtg_parse_bottom_reads_modern_layouts(text, set_code, number):
+    p = scanning._mtg_parse_bottom(text)
+    assert p["set_code"] == set_code
+    assert p["number"] == number
+    assert p["language"] == "EN"
+
+
+def test_mtg_parse_bottom_vintage_has_no_setcode_or_number():
+    # Pre-2003 cards print only a copyright year -- no set line, so the number
+    # must stay None (a bare year must never be read as a collector number).
+    p = scanning._mtg_parse_bottom(
+        "Illus. Sandra Everingham\n(c) 1995 Wizards of the Coast, Inc.")
+    assert p["set_code"] is None
+    assert p["number"] is None
+    assert p["year"] == 1995
+
+
+# --- recognize_image tiers ---
+
+def _ocr(**kw):
+    base = {"set_code": None, "number": None, "raw": "", "name_raw": None,
+            "name_candidates": [], "year": None, "language": None, "ok": False}
+    base.update(kw)
+    if base["name_raw"] and not base["name_candidates"]:
+        base["name_candidates"] = [base["name_raw"]]
+    return base
+
+
+def test_recognize_prefers_printed_set_and_number(db, monkeypatch):
     card = _seed_mtg(db, "1", "DFT", "57", "Riverchurn Monument")
     db.commit()
-    monkeypatch.setattr(scanning, "ocr_extract", lambda db, path, game: {
-        "set_code": "DFT", "number": "57", "raw": "", "name_raw": "Riverchurn Monument",
-        "language": None, "ok": True,
-    })
+    monkeypatch.setattr(scanning, "ocr_extract", lambda db, p, g: _ocr(
+        set_code="DFT", number="57", name_raw="Riverchurn Monument", ok=True))
     rec = scanning.recognize_image(db, "unused.png", "mtg")
-    assert rec["method"] == "ocr"
+    assert rec["method"] == "ocr_setnum"
     assert rec["candidates"][0]["card_id"] == card.id
-    assert rec["confidence"] == 0.95
+    assert rec["confidence"] == 0.97
 
 
-def test_recognize_image_falls_back_to_unique_name_match(db, monkeypatch):
+def test_recognize_unique_name_when_no_reference_phash(db, monkeypatch):
+    # No set/number, no phash on disk to hash -> a name unique across the
+    # catalog resolves on its own.
     card = _seed_mtg(db, "1", "DFT", "57", "Riverchurn Monument")
     db.commit()
-    monkeypatch.setattr(scanning, "ocr_extract", lambda db, path, game: {
-        "set_code": None, "number": None, "raw": "", "name_raw": "Riverchurn Monument",
-        "language": None, "ok": False,
-    })
+    monkeypatch.setattr(scanning, "ocr_extract", lambda db, p, g: _ocr(
+        name_raw="Riverchurn Monument"))
+    monkeypatch.setattr(scanning, "_card_crop_phash", lambda p: None)
     rec = scanning.recognize_image(db, "unused.png", "mtg")
     assert rec["method"] == "ocr_name"
     assert rec["candidates"][0]["card_id"] == card.id
 
 
-def test_recognize_image_scopes_phash_to_name_matches(db, monkeypatch):
-    # Two printings share a name (a reprint) -- name OCR alone can't pick one,
-    # but the phash comparison should only ever see these two, not the whole
-    # catalog.
-    forest_ice = _seed_mtg(db, "1", "ICE", "1", "Forest", phash="0" * 16)
-    forest_4ed = _seed_mtg(db, "2", "4ED", "2", "Forest", phash="f" * 16)
-    _seed_mtg(db, "3", "ICE", "3", "Unrelated Card", phash="0" * 16)
+def test_recognize_image_scopes_to_name_pool(db, monkeypatch):
+    # A reprint: two "Forest" printings, plus an unrelated card that happens to
+    # share the scan's hash. The scoped image match must pick the same-name
+    # printing, never the hash-twin with a different name.
+    import imagehash
+    match, far = "f" * 16, "0" * 16
+    _seed_mtg(db, "1", "ICE", "1", "Forest", phash=far)
+    forest_4ed = _seed_mtg(db, "2", "4ED", "2", "Forest", phash=match)
+    _seed_mtg(db, "3", "OTH", "9", "Unrelated Card", phash=match)
     db.commit()
-    expected_ids = {forest_ice.id, forest_4ed.id}
-    monkeypatch.setattr(scanning, "ocr_extract", lambda db, path, game: {
-        "set_code": None, "number": None, "raw": "", "name_raw": "Forest",
-        "language": None, "ok": False,
-    })
-    seen_ids = {}
-
-    def fake_phash_candidates(db, image_path, game, max_distance, top_n=5,
-                              card_ids=None, set_code=None):
-        seen_ids["card_ids"] = card_ids
-        from sqlalchemy import select as _select
-        pool = [c for c in db.execute(_select(CatalogCard)).scalars()
-                if card_ids is None or c.id in card_ids]
-        return [(pool[0], 0)] if pool else []
-
-    monkeypatch.setattr(scanning, "phash_candidates", fake_phash_candidates)
+    monkeypatch.setattr(scanning, "ocr_extract", lambda db, p, g: _ocr(name_raw="Forest"))
+    monkeypatch.setattr(scanning, "_card_crop_phash",
+                        lambda p: imagehash.hex_to_hash(match))
     rec = scanning.recognize_image(db, "unused.png", "mtg")
-    assert rec["method"] == "phash_name"
-    assert seen_ids["card_ids"] == expected_ids  # the two "Forest" ids, not "Unrelated Card"
+    assert rec["method"] == "img_scoped"
+    assert rec["candidates"][0]["card_id"] == forest_4ed.id
 
 
-def test_recognize_image_retries_unscoped_when_scoped_phash_is_empty(db, monkeypatch):
-    # Two "Forest" reprints (ambiguous by name -- doesn't uniquely resolve at
-    # the name tier) whose phashes haven't been built yet, plus an unrelated
-    # card that has one. The scoped search (restricted to the two Forests)
-    # must come back empty and retry unscoped rather than reporting no match.
-    _seed_mtg(db, "1", "ICE", "1", "Forest", phash=None)
-    _seed_mtg(db, "2", "4ED", "2", "Forest", phash=None)
-    other = _seed_mtg(db, "3", "ICE", "3", "Unrelated Card", phash="0" * 16)
+def test_recognize_unscoped_wins_when_scoped_match_is_poor(db, monkeypatch):
+    # OCR mis-reads the name onto the wrong card whose art is nothing like the
+    # scan; the true card lives elsewhere with a near-identical hash. The
+    # unscoped match must override the poor scoped (mis-read) one.
+    import imagehash
+    scan, far = "f0f0f0f0f0f0f0f0", "0f0f0f0f0f0f0f0f"
+    _seed_mtg(db, "1", "M13", "1", "Fervent Charge", phash=far)   # mis-read pool
+    real = _seed_mtg(db, "2", "WTH", "99", "Fervor", phash=scan)  # true card
     db.commit()
-    monkeypatch.setattr(scanning, "ocr_extract", lambda db, path, game: {
-        "set_code": None, "number": None, "raw": "", "name_raw": "Forest",
-        "language": None, "ok": False,
-    })
-    calls = []
-
-    def fake_phash_candidates(db, image_path, game, max_distance, top_n=5,
-                              card_ids=None, set_code=None):
-        calls.append(card_ids)
-        if card_ids is not None:
-            return []  # neither Forest reprint has a phash built yet
-        return [(other, 0)]
-
-    monkeypatch.setattr(scanning, "phash_candidates", fake_phash_candidates)
+    monkeypatch.setattr(scanning, "ocr_extract", lambda db, p, g: _ocr(name_raw="Fervent Charge"))
+    monkeypatch.setattr(scanning, "_card_crop_phash",
+                        lambda p: imagehash.hex_to_hash(scan))
     rec = scanning.recognize_image(db, "unused.png", "mtg")
-    assert rec["method"] == "phash"  # fell back to the unscoped sweep
-    assert rec["candidates"][0]["card_id"] == other.id
-    assert len(calls) == 2  # scoped attempt, then the unscoped retry
-    assert calls[0] is not None and calls[1] is None
+    assert rec["method"] == "img_unscoped"
+    assert rec["candidates"][0]["card_id"] == real.id
+
+
+def test_recognize_year_narrows_same_name_reprints(db, monkeypatch):
+    # Two printings of one name; the copyright year picks the era, then the
+    # image confirms the exact printing.
+    import imagehash
+    h = "ffff0000ffff0000"
+    old = _seed_mtg(db, "1", "4ED", "1", "Dark Ritual", phash="0" * 16)
+    old.release_date = "1995-04-01"
+    new = _seed_mtg(db, "2", "TMP", "2", "Dark Ritual", phash=h)
+    new.release_date = "1997-10-14"
+    db.commit()
+    monkeypatch.setattr(scanning, "ocr_extract", lambda db, p, g: _ocr(
+        name_raw="Dark Ritual", year=1997))
+    monkeypatch.setattr(scanning, "_card_crop_phash", lambda p: imagehash.hex_to_hash(h))
+    rec = scanning.recognize_image(db, "unused.png", "mtg")
+    assert rec["candidates"][0]["card_id"] == new.id

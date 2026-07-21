@@ -8,7 +8,9 @@ from sqlalchemy.orm import Session
 
 from ..db import get_db
 from ..models import CatalogCard, ProcessedScan, ScanPull, ScanQueueItem
-from ..services import exporting, pricing, scanning, staging as staging_svc
+from ..services import (
+    cloud_recognition, exporting, pricing, scanning, staging as staging_svc,
+)
 from ..services.settings import get_setting
 from .serializers import scan_item_dict
 
@@ -165,6 +167,57 @@ def bulk_update(payload: dict = Body(...), db: Session = Depends(get_db)):
             count += 1
     db.commit()
     return {"affected": count}
+
+
+def _item_game(db: Session, item: ScanQueueItem, fallback: str | None) -> str:
+    """Best guess of a queue item's game (not stored on the row): from its
+    chosen card, else its top candidate, else the caller's hint, else mtg."""
+    if item.card_id:
+        c = db.get(CatalogCard, item.card_id)
+        if c:
+            return c.game
+    for cand in (item.candidates or []):
+        c = db.get(CatalogCard, cand.get("card_id"))
+        if c:
+            return c.game
+    return fallback or "mtg"
+
+
+@router.post("/queue/reeval")
+def reeval(payload: dict = Body(...), db: Session = Depends(get_db)):
+    """Manually re-identify selected scans with the hosted vision model.
+
+    Only the images the user selected are sent out; a config problem (no key)
+    is reported before any row is touched, per-image transport failures are
+    collected so one bad image doesn't sink the batch.
+    """
+    ids = payload.get("ids", [])
+    if not ids:
+        raise HTTPException(400, "no ids given")
+    model = payload.get("model")
+    items = db.execute(select(ScanQueueItem).where(
+        ScanQueueItem.id.in_(ids))).scalars().all()
+    threshold = float(get_setting(db, "confidence_threshold"))
+    updated, errors = [], []
+    for it in items:
+        game = _item_game(db, it, payload.get("game"))
+        try:
+            rec = cloud_recognition.reidentify(db, it.image_path, game, model)
+        except RuntimeError as e:            # misconfiguration: stop, surface it
+            raise HTTPException(400, str(e))
+        except Exception as e:               # transport/parse: skip this image
+            errors.append({"id": it.id, "error": str(e)})
+            continue
+        top = rec["candidates"][0] if rec["candidates"] else None
+        it.candidates = rec["candidates"]
+        it.method = rec["method"]
+        it.confidence = rec["confidence"]
+        if top:
+            it.card = db.get(CatalogCard, top["card_id"])  # set relationship, not just FK
+        it.status = "pending" if (top and rec["confidence"] >= threshold) else "needs_review"
+        updated.append(it)
+    db.commit()
+    return {"updated": [_scan_dict(db, it) for it in updated], "errors": errors}
 
 
 @router.post("/queue/{item_id}/confirm")

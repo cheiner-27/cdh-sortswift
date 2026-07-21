@@ -9,6 +9,12 @@ DEFAULTS = {
     "confidence_threshold": 0.75,        # below this -> needs_review
     "phash_max_distance": 12,            # hamming distance cutoff for candidates
     "tesseract_cmd": "",                 # blank = use PATH
+    # Manual cloud re-identify (never called automatically): the hosted vision
+    # model, an optional key override (blank = OPENAI_API_KEY env var), and the
+    # confidence at/below which the review UI pre-selects a scan for re-eval.
+    "openai_model": "gpt-5.2",
+    "openai_api_key": "",
+    "reeval_auto_select_below": 0.40,
     "shippo_api_token": "",
     "shippo_test_mode": True,
     "label_min_order_value": 25.0,       # orders <= this skip auto label

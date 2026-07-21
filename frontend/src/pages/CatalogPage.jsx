@@ -14,13 +14,34 @@ export default function CatalogPage() {
   const [browseSet, setBrowseSet] = useState('')
   const [browseCards, setBrowseCards] = useState([])
   const [browseBusy, setBrowseBusy] = useState(false)
+  const [phashCov, setPhashCov] = useState(null)
 
   const refresh = () => api.get('/api/catalog/stats').then(setStats)
+  const loadCoverage = () =>
+    api.get(`/api/catalog/phash/coverage?game=${game}`).then(setPhashCov).catch(() => {})
   useEffect(() => { refresh() }, [])
   useEffect(() => {
     api.get(`/api/catalog/sets?game=${game}`).then(setSets)
     setBrowseSet(''); setBrowseCards([])
+    loadCoverage()
   }, [game, stats])
+  // While a background whole-catalog build runs, poll coverage so the bar climbs.
+  useEffect(() => {
+    if (!phashCov?.build?.running) return
+    const t = setInterval(loadCoverage, 3000)
+    return () => clearInterval(t)
+  }, [phashCov?.build?.running, game])
+
+  const buildAllPhashes = async () => {
+    try {
+      await api.post('/api/catalog/phash/build-all', { game })
+      ok('Phash build started — runs in the background, skips what you already have')
+      loadCoverage()
+    } catch (e) { err(e) }
+  }
+  const buildSetPhashes = (code) =>
+    run(`build phashes ${code}`, () =>
+      api.post('/api/catalog/phash/build', { game, set_code: code })).then(loadCoverage)
 
   const loadSet = async (reset) => {
     if (!browseSet) return
@@ -65,9 +86,9 @@ export default function CatalogPage() {
             () => api.post('/api/catalog/backfill-ids', { game }))}
             title="Fill missing TCGplayer product ids on MTG tokens/promos from TCGcsv, then re-run Sync prices">
             Backfill TCGplayer IDs</button>}
-          <button disabled={!!busy} onClick={() => run(`build phashes ${setCode || game}`,
-            () => api.post('/api/catalog/phash/build', { game, set_code: setCode || undefined, limit: 2000 }))}>
-            Build reference phashes</button>
+          <button disabled={!!busy || phashCov?.build?.running} onClick={buildAllPhashes}
+            title="Build every missing reference phash for this game in the background. Skips cards already hashed, so it's safe to re-run; watch progress in the coverage panel below.">
+            {phashCov?.build?.running ? 'Building phashes…' : 'Build all phashes (background)'}</button>
           {game === 'pokemon' && (
             <button disabled={!!busy} title="Merge leftover pokemontcg.io cards into the current TCGcsv set codes and remove the duplicate sets"
               onClick={() => {
@@ -110,6 +131,34 @@ export default function CatalogPage() {
                 <td>{stats[g]?.sets}</td><td>{stats[g]?.phashes}</td></tr>))}</tbody></table>
           <p className="muted">Price rows: {stats.price_rows}</p>
         </div>
+      )}
+
+      {phashCov && (
+        <details className="panel">
+          <summary>
+            Reference phash coverage — <b>{phashCov.hashed}/{phashCov.total}</b> ({phashCov.pct}%)
+            {phashCov.build?.running &&
+              <span style={{ color: 'var(--blue)' }}> · building… {phashCov.build.built}/{phashCov.build.total}</span>}
+            {phashCov.build?.error &&
+              <span style={{ color: 'var(--red)' }}> · error: {phashCov.build.error}</span>}
+          </summary>
+          <p className="muted" style={{ marginTop: 12 }}>
+            Per-set image-match coverage (least-covered first). "Build all" above does the whole game
+            in the background; or fill one set at a time here. Already-hashed cards are always skipped.
+          </p>
+          <div className="table-wrap" style={{ maxHeight: 420, overflowY: 'auto' }}>
+            <table><thead><tr><th>Set</th><th>Cards</th><th>Hashed</th><th>%</th><th></th></tr></thead>
+              <tbody>{phashCov.sets.map((s) => (
+                <tr key={s.set_code}>
+                  <td>{s.set_code} <span className="muted">{s.set_name}</span></td>
+                  <td>{s.cards}</td><td>{s.hashed}</td>
+                  <td style={{ color: s.pct === 100 ? 'var(--green)' : s.pct === 0 ? 'var(--muted)' : 'inherit' }}>{s.pct}%</td>
+                  <td>{s.hashed < s.cards &&
+                    <button className="small" disabled={!!busy || phashCov.build?.running}
+                      onClick={() => buildSetPhashes(s.set_code)}>Build</button>}</td>
+                </tr>))}</tbody></table>
+          </div>
+        </details>
       )}
 
       <div className="panel">
