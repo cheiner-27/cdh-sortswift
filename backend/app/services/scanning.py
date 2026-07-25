@@ -475,6 +475,32 @@ def phash_candidates(db: Session, image_path: str, game: str | None,
     return scored[:top_n]
 
 
+def _fetch_phash_image(client, url: str, attempts: int = 4):
+    """Fetch a catalog image, retrying transient failures and honoring HTTP 429
+    rate limits with exponential backoff. A whole-game build fires tens of
+    thousands of requests; Scryfall's image CDN throttles a sustained burst with
+    429s, and without a retry the build silently plateaus (every later fetch
+    fails, so the hashed count stops climbing ~2k in). Returns image bytes, or
+    None if it genuinely can't be fetched after all attempts."""
+    import time as _time
+    for attempt in range(attempts):
+        try:
+            r = client.get(url)
+            if r.status_code == 429:
+                retry_after = r.headers.get("Retry-After")
+                wait = float(retry_after) if retry_after else float(2 ** attempt)
+                _time.sleep(min(wait, 30))
+                continue
+            r.raise_for_status()
+            return r.content
+        except Exception as e:
+            if attempt == attempts - 1:
+                log.warning("phash fetch failed for %s: %s", url, e)
+                return None
+            _time.sleep(float(2 ** attempt))
+    return None
+
+
 def build_catalog_phashes(db: Session, game: str, set_code: str | None = None,
                           limit: int | None = None, progress=None) -> int:
     """Download catalog reference images and store their phashes (opt-in, slow).
@@ -501,18 +527,22 @@ def build_catalog_phashes(db: Session, game: str, set_code: str | None = None,
         q = q.limit(limit)
     cards = db.execute(q).scalars().all()
     n = 0
+    processed = 0
     import io as _io
     with _http_client(min_interval=0.1, timeout=30) as c:
         for card in cards:
-            try:
-                r = c.get(card.image_url)
-                r.raise_for_status()
-                with Image.open(_io.BytesIO(r.content)) as img:
-                    card.phash = str(imagehash.phash(img.convert("RGB")))
-                n += 1
-            except Exception as e:
-                log.warning("phash build failed for %s: %s", card.name, e)
-            if n and n % 100 == 0:
+            processed += 1
+            content = _fetch_phash_image(c, card.image_url)
+            if content is not None:
+                try:
+                    with Image.open(_io.BytesIO(content)) as img:
+                        card.phash = str(imagehash.phash(img.convert("RGB")))
+                    n += 1
+                except Exception as e:
+                    log.warning("phash decode failed for %s: %s", card.name, e)
+            # Commit/report on cards *processed* (not just hashed) so progress is
+            # saved and shown steadily even through a run of fetch failures.
+            if processed % 100 == 0:
                 db.commit()
                 if progress:
                     progress(n)
@@ -826,6 +856,8 @@ def pull_scans(
                 language=rec["language"] or defaults.get("language", "en"),
                 bin=bin_name or defaults.get("bin", ""),
                 cost=defaults.get("cost"),
+                # Session-level "pull from bulk" source pile (optional).
+                source_bulk_id=defaults.get("source_bulk_id"),
             )
             db.add(item)
 

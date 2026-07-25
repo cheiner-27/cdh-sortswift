@@ -128,6 +128,7 @@ Catalog data (card names, set codes, collector numbers, printings, images) is fe
 During a scanning session:
 - User sets a **session-default condition** (NM, LP, MP, HP, Damaged) before scanning begins. Changeable at any time mid-session.
 - User can also set a **session-default printing/variant** (e.g. "treat this batch as Foil") and a **session-default bin**, mirroring session-default condition — a whole pull can be pre-assigned in one go, with per-card override for exceptions.
+- User can optionally set a **source bulk lot** for the session (see Section 4, Bulk piles): each card confirmed from this pull is *pulled out of* that bulk pile — decrementing it and carrying its per-card cost — instead of being counted as a fresh purchase. Overridable per card and via bulk-set, like the other session defaults.
 - Each recognized card is presented for review with its assigned condition (and printing/bin) pre-filled from the session defaults.
 - User can override any of these per card before confirming.
 - User confirms or rejects each recognition result. **Reject** discards the recognition result and removes the item from the active queue — the source image is never deleted or moved, so it can be resolved immediately via manual search (Section 1) or re-pulled later by clearing its hash from `processed_scans`.
@@ -224,6 +225,14 @@ For products outside the four game catalogs — graded slabs, sealed product, su
 **UPC lookup:** a barcode field on manual add resolves against custom-catalog UPCs — the intake path for sealed/accessory items that the OCR pipeline deliberately excludes (Section 1).
 
 **Sealed product breakdown:** a "Break Down Sealed Product" action deducts 1 from a parent sealed item (box, case, display) and creates the component items (box→packs, case→displays) as new inventory records, carrying cost across proportionally. User sets per-unit price (markup % or flat amount) before confirming; new component items sync to marketplaces normally.
+
+**Bulk piles (uninventoried card lots):** for cheap cards bought and sold *by the count* without tracking each one — commons, lands, energy, "500 assorted." A bulk pile is a custom product with `item_type = "bulk"` and a single SKU whose inventory quantity is a **running card count**; it never records which cards are in it. This is deliberately distinct from the **Bulk Lot Builder** (Section 7), which bundles specific, individually-tracked singles into one listing, and from sealed product, which is a discrete unit. Managed on a dedicated **Bulk** page (list piles with on-hand count, total cost basis, and average/next per-card cost; create; buy; sell). Three operations:
+
+- **Buy into a pile:** record a purchase as card count + what you paid (a total, or a per-card cost). Each purchase writes one **FIFO cost batch** (Section 3's `acquisition_log`), so the exact per-batch cost is preserved — e.g. buy 500 @ $0.05 then 1,000 @ $0.06 and the first 500 cards to leave cost $0.05, the next 1,000 $0.06. Bulk is **capitalized as inventory** (FIFO), not expensed up front.
+- **Pull cards out (during scanning):** the primary way good cards graduate from a pile into tracked inventory. In a scan session, an optional **source bulk lot** (Section 2) is set; each card confirmed/approved is *pulled out of* that pile — decrementing it by the quantity and moving that quantity's FIFO cost basis **and acquisition age** onto the new tracked inventory record. No fresh purchase is booked and total cost basis is conserved (the pulled "hit" carries its ~$0.05 share of the pile's cost, so its eventual sale shows near-full profit); the intake cost field is ignored when a source lot is set. Deductions clamp at the pile's on-hand.
+- **Sell a pile in chunks:** a manual/offline sale by card count + sale price (e.g. 100 cards for $5). COGS is booked **FIFO** (oldest cards first) and the sale lands in Orders and the P&L report (Sections 8–9) like any other sale.
+
+Quantity is always **individual cards**, so both "sold a pack of 100" and "pulled one hit" are ordinary deductions of 100 and 1. Bulk piles are **in-store only** (per-marketplace listing cap 0, Section 3) so a large pile never auto-lists as a single marketplace item; direct marketplace listing of bulk lots is deferred.
 
 ---
 

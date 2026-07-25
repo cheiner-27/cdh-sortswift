@@ -12,6 +12,7 @@ import LotsPage from './pages/LotsPage.jsx'
 import OrdersPage from './pages/OrdersPage.jsx'
 import ReportsPage from './pages/ReportsPage.jsx'
 import CustomItemsPage from './pages/CustomItemsPage.jsx'
+import BulkPage from './pages/BulkPage.jsx'
 import CatalogPage from './pages/CatalogPage.jsx'
 import SettingsPage from './pages/SettingsPage.jsx'
 import CycleCountPage from './pages/CycleCountPage.jsx'
@@ -28,6 +29,7 @@ const nav = [
   { to: '/cycle-counts', label: 'Cycle Counts' },
   { to: '/export', label: 'Export' },
   { to: '/custom', label: 'Custom Items' },
+  { to: '/bulk', label: 'Bulk' },
   { section: 'Selling' },
   { to: '/pricing', label: 'Pricing' },
   { to: '/marketplaces', label: 'Marketplaces' },
@@ -63,6 +65,7 @@ export default function App() {
           <Route path="/cycle-counts" element={<CycleCountPage />} />
           <Route path="/export" element={<ExportPage />} />
           <Route path="/custom" element={<CustomItemsPage />} />
+          <Route path="/bulk" element={<BulkPage />} />
           <Route path="/pricing" element={<PricingPage />} />
           <Route path="/marketplaces" element={<MarketplacesPage />} />
           <Route path="/lots" element={<LotsPage />} />

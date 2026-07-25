@@ -119,7 +119,7 @@ def update_item(item_id: int, payload: dict = Body(...), db: Session = Depends(g
     if not item:
         raise HTTPException(404)
     for field in ("card_id", "condition", "printing", "language", "bin",
-                  "quantity", "cost", "status"):
+                  "quantity", "cost", "status", "source_bulk_id"):
         if field in payload:
             setattr(item, field, payload[field])
     if "card_id" in payload and payload["card_id"]:
@@ -152,7 +152,8 @@ def bulk_update(payload: dict = Body(...), db: Session = Depends(get_db)):
     count = 0
     for it in items:
         if action == "set":
-            for f in ("condition", "printing", "language", "bin", "quantity", "cost"):
+            for f in ("condition", "printing", "language", "bin", "quantity",
+                      "cost", "source_bulk_id"):
                 if f in payload.get("values", {}):
                     setattr(it, f, payload["values"][f])
             count += 1

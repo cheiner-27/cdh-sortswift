@@ -50,7 +50,7 @@ def edit_row(row_id: int, payload: dict = Body(...), db: Session = Depends(get_d
     if not row:
         raise HTTPException(404)
     for f in ("condition", "printing", "language", "bin", "quantity",
-              "cost", "price", "comment", "catalog_card_id"):
+              "cost", "price", "comment", "catalog_card_id", "source_bulk_id"):
         if f in payload:
             setattr(row, f, payload[f])
     if "acquired_at" in payload:
@@ -99,6 +99,7 @@ def manual_add(payload: dict = Body(...), db: Session = Depends(get_db)):
         price=payload.get("price"),
         acquired_at=_parse_date(payload.get("acquired_at")),
         comment=payload.get("comment", ""),
+        source_bulk_id=payload.get("source_bulk_id"),
     )
     if not fields["catalog_card_id"] and not fields["custom_sku_id"]:
         raise HTTPException(400, "catalog_card_id or custom_sku_id required")
@@ -135,7 +136,8 @@ def bulk_add(payload: dict = Body(...), db: Session = Depends(get_db)):
             quantity=int(r.get("quantity", 1)),
             cost=r.get("cost"), price=r.get("price"),
             acquired_at=_parse_date(r.get("acquired_at")),
-            comment=r.get("comment", ""))
+            comment=r.get("comment", ""),
+            source_bulk_id=r.get("source_bulk_id"))
         if direct:
             staging_svc.add_direct(db, **fields)
         else:

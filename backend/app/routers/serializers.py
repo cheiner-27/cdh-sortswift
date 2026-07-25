@@ -62,6 +62,7 @@ def scan_item_dict(s: ScanQueueItem, *, market_value: float | None = None) -> di
         "condition": s.condition, "printing": s.printing,
         "language": s.language, "bin": s.bin, "quantity": s.quantity,
         "cost": s.cost, "market_value": market_value,
+        "source_bulk_id": s.source_bulk_id,
     }
 
 
@@ -77,6 +78,7 @@ def staging_dict(s: StagingItem, *, market_value: float | None = None) -> dict:
         "acquired_at": s.acquired_at.isoformat() if s.acquired_at else None,
         "scan_image_path": s.scan_image_path,
         "import_batch_id": s.import_batch_id,
+        "source_bulk_id": s.source_bulk_id,
         "market_value": market_value,
         "created_at": s.created_at.isoformat() if s.created_at else None,
     }

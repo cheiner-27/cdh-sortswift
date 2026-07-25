@@ -243,6 +243,32 @@ def split_cost_basis(db: Session, source: InventoryItem, target: InventoryItem,
     return round(moved_cost, 4)
 
 
+def pull_from_bulk(db: Session, target: InventoryItem, bulk: InventoryItem,
+                   quantity: int, comment: str = "") -> int:
+    """Pull `quantity` cards OUT of a bulk pile into a tracked inventory record.
+
+    Moves both the units and their FIFO cost basis (oldest first, preserving
+    unit_cost + acquired_at) from the pile onto `target` — no sale/COGS is
+    booked and total cost basis is conserved, so the pulled card carries its
+    share of the pile's per-card cost and inherits the pile's acquisition age.
+    Deductions clamp at the pile's on-hand, so the return value (units actually
+    moved) can be less than `quantity` if the pile ran short. Uses
+    split_cost_basis (NOT record_acquisition) precisely so cost isn't
+    double-counted against the pile's original purchase.
+    """
+    target_label = item_description(target)
+    bulk_label = item_description(bulk)
+    applied = apply_delta(db, bulk, -abs(quantity), type="deduction",
+                          cause="pull_to_inventory",
+                          comment=comment or f"pulled {abs(quantity)} to {target_label}")
+    moved = -applied
+    if moved > 0:
+        apply_delta(db, target, moved, type="addition", cause="pull_from_bulk",
+                    comment=comment or f"pulled from bulk {bulk_label}")
+        split_cost_basis(db, bulk, target, moved)
+    return moved
+
+
 def rekey_cost_basis(db: Session, item: InventoryItem, *, old_condition: str,
                      old_printing: str) -> float:
     """Follow the FIFO cost basis when an item's condition/printing changes.

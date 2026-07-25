@@ -52,3 +52,9 @@ acquisition batches, consumed oldest-first when you sell.
 
 **Staging** — the review buffer between intake (scan/import/manual add) and live
 inventory. Nothing is live until approved.
+
+**Bulk pile** — cards bought and sold *by the count* without tracking each one
+(commons, lands, "500 assorted"). Tracks a card count + FIFO cost, sold in
+chunks, and sifted on the Scan page by picking it as the *pull-from* source.
+Distinct from a **Bulk lot** (the lot builder), which bundles specific tracked
+cards into one listing.

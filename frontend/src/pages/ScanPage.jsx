@@ -21,6 +21,7 @@ export default function ScanPage() {
   const [msg, ok, err] = useMsg()
   const [settings, setSettings] = useState(null)
   const [pulls, setPulls] = useState([])
+  const [piles, setPiles] = useState([])
   const [items, setItems] = useState([])
   const [activePull, setActivePull] = useState(null)
   const [selected, setSelected] = useState(new Set())
@@ -34,7 +35,7 @@ export default function ScanPage() {
   // a session default — it's a per-card property set during review.
   const [form, setForm] = useState({
     folder: '', game: 'mtg', use_subfolder_bins: false, pair_front_back: false,
-    condition: 'NM', language: 'en', bin: '', cost: '',
+    condition: 'NM', language: 'en', bin: '', cost: '', source_bulk_id: '',
   })
 
   useEffect(() => {
@@ -43,7 +44,10 @@ export default function ScanPage() {
       setForm((f) => ({ ...f, folder: s.scan_folder || '', ...s.session_defaults }))
     })
     refreshPulls()
+    refreshPiles()
   }, [])
+
+  const refreshPiles = () => api.get('/api/bulk/piles').then(setPiles).catch(() => {})
 
   const refreshPulls = () => api.get('/api/scans/pulls').then(setPulls)
   const loadQueue = async (pullId) => {
@@ -64,6 +68,7 @@ export default function ScanPage() {
           condition: form.condition,
           language: form.language, bin: form.bin,
           cost: form.cost === '' ? null : Number(form.cost),
+          source_bulk_id: form.source_bulk_id === '' ? null : Number(form.source_bulk_id),
         },
       })
       ok(`Pulled ${res.image_count} new image(s), ${res.items} queue item(s)`)
@@ -188,7 +193,16 @@ export default function ScanPage() {
           <Field label="Session bin"><input style={{ width: 100 }} value={form.bin}
             onChange={(e) => setForm({ ...form, bin: e.target.value })} /></Field>
           <Field label="Unit cost ($)"><input style={{ width: 80 }} value={form.cost}
-            onChange={(e) => setForm({ ...form, cost: e.target.value })} /></Field>
+            onChange={(e) => setForm({ ...form, cost: e.target.value })}
+            disabled={form.source_bulk_id !== ''}
+            title={form.source_bulk_id !== '' ? 'Ignored — cost comes from the bulk pile these are pulled from' : ''} /></Field>
+          <Field label="Pull from bulk lot">
+            <select style={{ width: 170 }} value={form.source_bulk_id}
+              onChange={(e) => setForm({ ...form, source_bulk_id: e.target.value })}
+              title="Optional: cards confirmed this session are pulled OUT of this bulk pile (decrement + carry its cost) instead of added as fresh stock.">
+              <option value="">— fresh stock —</option>
+              {piles.map((p) => <option key={p.id} value={p.id}>{p.name} ({p.on_hand})</option>)}
+            </select></Field>
         </div>
         <div className="row center">
           <label title="Instead of the images directly in the folder, treat each immediate subfolder as its own bin and pull the images inside each.">
@@ -206,6 +220,9 @@ export default function ScanPage() {
           condition / language / bin / cost are just defaults stamped on every card in this batch —
           you can override any of them per card in the review queue. Printing is set per card (foils
           and holos are mixed in a batch), so there's no session printing.
+          {' '}Set <b>Pull from bulk lot</b> when you're sifting a bulk pile: each card you confirm is
+          decremented from that pile and carries its share of the pile's cost, instead of being counted
+          as a fresh purchase (so the pile's card count drops as you pull the good ones).
         </p>
       </div>
 
@@ -279,6 +296,11 @@ export default function ScanPage() {
               {meta.languages.map((l) => <option key={l}>{l}</option>)}</select>
             <input placeholder="bin…" style={{ width: 90 }}
               onChange={(e) => setBulkVals({ ...bulkVals, bin: e.target.value })} />
+            <select title="Set source bulk lot for the selected cards"
+              onChange={(e) => setBulkVals({ ...bulkVals, source_bulk_id: e.target.value === '' ? null : Number(e.target.value) })} defaultValue="__none__">
+              <option value="__none__" disabled>bulk lot…</option>
+              <option value="">— fresh stock —</option>
+              {piles.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}</select>
             <button className="small" disabled={!selected.size}
               onClick={() => bulk('set', bulkVals)}>Bulk set</button>
             <button className="small primary" disabled={!selected.size}
@@ -293,7 +315,7 @@ export default function ScanPage() {
             <thead><tr>
               <th><input type="checkbox" checked={selected.size === shown.length && shown.length > 0} onChange={toggleAll} /></th>
               <th>Scan</th><th>Match</th><th>Market</th><th>Confidence</th><th>Cond</th><th>Printing</th>
-              <th>Lang</th><th>Bin</th><th>Qty</th><th></th>
+              <th>Lang</th><th>Bin</th><th>Qty</th><th>Source</th><th></th>
             </tr></thead>
             <tbody>{shown.map((it) => (
               <tr key={it.id}>
@@ -334,6 +356,12 @@ export default function ScanPage() {
                   onBlur={(e) => e.target.value !== it.bin && patchItem(it.id, { bin: e.target.value })} /></td>
                 <td><input type="number" min="1" style={{ width: 55 }} defaultValue={it.quantity}
                   onBlur={(e) => patchItem(it.id, { quantity: Number(e.target.value) || 1 })} /></td>
+                <td><select style={{ width: 120 }} value={it.source_bulk_id ?? ''}
+                  title="Pull this card out of a bulk pile (decrement + carry cost) instead of adding fresh stock"
+                  onChange={(e) => patchItem(it.id, { source_bulk_id: e.target.value === '' ? null : Number(e.target.value) })}>
+                  <option value="">— fresh —</option>
+                  {piles.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
+                </select></td>
                 <td>
                   <button className="small primary" disabled={!it.card} onClick={() => confirmOne(it)}>Confirm</button>{' '}
                   <button className="small danger" onClick={() => rejectOne(it)}>Reject</button>

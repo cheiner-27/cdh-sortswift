@@ -149,3 +149,21 @@ def ensure_schema() -> None:
                 conn.execute(text(
                     "CREATE INDEX IF NOT EXISTS ix_cards_game_namenorm "
                     "ON catalog_cards (game, name_norm)"))
+
+    # 8) scan_queue / staging source_bulk_id: optional source bulk pile so a
+    #    scanned/manually-added card can be *pulled out of* a bulk pile
+    #    (decrement + carry FIFO cost) instead of adding fresh stock.
+    if "scan_queue" in tables:
+        qcols = {c["name"] for c in insp.get_columns("scan_queue")}
+        if "source_bulk_id" not in qcols:
+            with engine.begin() as conn:
+                conn.execute(text(
+                    "ALTER TABLE scan_queue ADD COLUMN source_bulk_id INTEGER "
+                    "REFERENCES inventory(id)"))
+    if "staging" in tables:
+        scols = {c["name"] for c in insp.get_columns("staging")}
+        if "source_bulk_id" not in scols:
+            with engine.begin() as conn:
+                conn.execute(text(
+                    "ALTER TABLE staging ADD COLUMN source_bulk_id INTEGER "
+                    "REFERENCES inventory(id)"))

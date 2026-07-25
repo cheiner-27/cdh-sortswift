@@ -11,10 +11,13 @@ export default function StagingPage() {
   const [selected, setSelected] = useState(new Set())
   const [showAdd, setShowAdd] = useState(false)
   const [simResults, setSimResults] = useState(null)
+  const [piles, setPiles] = useState([])
+  const pileName = (id) => piles.find((p) => p.id === id)?.name || `#${id}`
 
   const refresh = () =>
     api.get(`/api/staging${source ? `?source=${source}` : ''}`).then(setRows)
   useEffect(() => { refresh() }, [source])
+  useEffect(() => { api.get('/api/bulk/piles').then(setPiles).catch(() => {}) }, [])
 
   const toggle = (id) => setSelected((s) => {
     const n = new Set(s); n.has(id) ? n.delete(id) : n.add(id); return n
@@ -89,6 +92,9 @@ export default function StagingPage() {
               {r.scan_image_path && <img className="card-img" src={scanImageUrl(r.scan_image_path)} alt="" />}
               <div>{r.card ? r.card.name : r.custom_name || '?'}</div>
               {r.card && <div className="muted">{r.card.set_code} #{r.card.collector_number}</div>}
+              {r.source_bulk_id && <span className="badge blue"
+                title="On approve, this card is pulled OUT of this bulk pile (decrement + carry its cost) instead of added as fresh stock.">
+                ⟵ from {pileName(r.source_bulk_id)}</span>}
             </td>
             <td><span className="badge">{r.source}</span></td>
             <td><select value={r.condition} onChange={(e) => patch(r.id, { condition: e.target.value })}>
@@ -101,8 +107,10 @@ export default function StagingPage() {
               onBlur={(e) => e.target.value !== r.bin && patch(r.id, { bin: e.target.value })} /></td>
             <td><input type="number" min="1" style={{ width: 55 }} defaultValue={r.quantity}
               onBlur={(e) => patch(r.id, { quantity: Number(e.target.value) || 1 })} /></td>
-            <td><input style={{ width: 65 }} defaultValue={r.cost ?? ''}
-              onBlur={(e) => patch(r.id, { cost: e.target.value === '' ? null : Number(e.target.value) })} /></td>
+            <td>{r.source_bulk_id
+              ? <span className="muted" title="Cost comes from the bulk pile this card is pulled from">(from bulk)</span>
+              : <input style={{ width: 65 }} defaultValue={r.cost ?? ''}
+                  onBlur={(e) => patch(r.id, { cost: e.target.value === '' ? null : Number(e.target.value) })} />}</td>
             <td><input type="date" style={{ width: 130 }} defaultValue={r.acquired_at ? r.acquired_at.slice(0, 10) : ''}
               onBlur={(e) => patch(r.id, { acquired_at: e.target.value || null })} title="Original purchase date (drives FIFO age)" /></td>
             <td style={{ whiteSpace: 'nowrap' }} title="TCGplayer market value (reference)">

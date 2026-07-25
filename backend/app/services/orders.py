@@ -343,7 +343,10 @@ def create_manual_order(db: Session, *, buyer_name: str, items: list[dict],
     from ..models import OrderItem
     when = parse_sale_date(ordered_at)
     order = Order(marketplace="manual",
-                  external_order_id=f"manual-{utcnow().strftime('%Y%m%d%H%M%S')}",
+                  # microsecond precision so two manual sales in the same second
+                  # (e.g. several bulk packs in a row) don't collide on the
+                  # (marketplace, external_order_id) unique constraint.
+                  external_order_id=f"manual-{utcnow().strftime('%Y%m%d%H%M%S%f')}",
                   buyer_name=buyer_name, order_total=total or 0.0,
                   shipping_cost=round(float(shipping_cost or 0), 2),
                   marketplace_fees=round(float(marketplace_fees or 0), 2),

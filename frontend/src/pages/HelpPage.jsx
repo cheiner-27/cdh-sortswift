@@ -14,6 +14,7 @@ const DOCS = [
   ['expenses', 'Expenses'],
   ['cycle-counts', 'Cycle counts'],
   ['custom-items', 'Custom items'],
+  ['bulk', 'Bulk'],
   ['glossary', 'Glossary'],
 ]
 

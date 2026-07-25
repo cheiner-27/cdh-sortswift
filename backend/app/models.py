@@ -208,6 +208,9 @@ class ScanQueueItem(Base):
     bin: Mapped[str] = mapped_column(String, default="")
     quantity: Mapped[int] = mapped_column(Integer, default=1)
     cost: Mapped[float | None] = mapped_column(Float, nullable=True)
+    # Optional source bulk pile: when set, confirming this scan pulls the card
+    # OUT of that pile (decrement + carry cost) instead of adding fresh stock.
+    source_bulk_id: Mapped[int | None] = mapped_column(ForeignKey("inventory.id"), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
     pull: Mapped[ScanPull] = relationship(back_populates="items")
     card: Mapped[CatalogCard | None] = relationship()
@@ -237,6 +240,9 @@ class StagingItem(Base):
     scan_image_path: Mapped[str | None] = mapped_column(String, nullable=True)
     back_image_path: Mapped[str | None] = mapped_column(String, nullable=True)
     import_batch_id: Mapped[int | None] = mapped_column(ForeignKey("import_batches.id"), nullable=True)
+    # Optional source bulk pile carried through from a scan/manual add: when set,
+    # approving this row pulls the card OUT of that pile (decrement + carry cost).
+    source_bulk_id: Mapped[int | None] = mapped_column(ForeignKey("inventory.id"), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
     card: Mapped[CatalogCard | None] = relationship()
     custom_sku: Mapped[CustomSku | None] = relationship()

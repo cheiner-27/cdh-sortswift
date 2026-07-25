@@ -92,3 +92,35 @@ def test_full_flow(client):
     detail = client.get(f"/api/inventory/{inv_id}").json()
     causes = {h["cause"] for h in detail["history"]}
     assert "sale" in causes and "refund" in causes
+
+
+def test_bulk_pile_api_flow(client):
+    """Bulk router is mounted and buy -> FIFO -> sell works over HTTP."""
+    pile = client.post("/api/bulk/piles", json={
+        "name": "MTG Bulk Commons", "game": "Magic"}).json()
+    pid = pile["id"]
+    client.post(f"/api/bulk/piles/{pid}/purchase",
+                json={"quantity": 500, "unit_cost": 0.05, "acquired_at": "2025-01-01"})
+    client.post(f"/api/bulk/piles/{pid}/purchase",
+                json={"quantity": 1000, "unit_cost": 0.06, "acquired_at": "2025-02-01"})
+
+    piles = client.get("/api/bulk/piles").json()
+    mine = [p for p in piles if p["id"] == pid][0]
+    assert mine["on_hand"] == 1500
+    assert round(mine["cost_basis"], 2) == 85.0        # 500×.05 + 1000×.06
+    assert mine["next_unit_cost"] == 0.05
+
+    r = client.post(f"/api/bulk/piles/{pid}/sell",
+                    json={"quantity": 800, "total_price": 40.0, "buyer_name": "Whatnot"})
+    assert r.status_code == 200
+    order = client.get("/api/orders").json()
+    sold = [o for o in order if o["id"] == r.json()["order_id"]][0]
+    assert round(sum(li["cogs"] or 0 for li in sold["items"]), 2) == 43.0  # 500×.05 + 300×.06
+    assert sold["buyer_name"] == "Whatnot"   # platform recorded like a regular sale
+    assert [p for p in client.get("/api/bulk/piles").json() if p["id"] == pid][0]["on_hand"] == 700
+
+    # delete the (stocked) pile -> hidden from the pile list, sale history kept
+    d = client.delete(f"/api/bulk/piles/{pid}")
+    assert d.json()["soft_deleted"] is True
+    assert all(p["id"] != pid for p in client.get("/api/bulk/piles").json())
+    assert any(o["id"] == sold["id"] for o in client.get("/api/orders").json())
