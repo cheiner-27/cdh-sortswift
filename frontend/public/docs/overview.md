@@ -11,9 +11,12 @@ database.
 2. **Scan** (or **Add cards** / **CSV Import**) — get cards into the system.
    Scanning recognizes images from a folder; you confirm each match.
 3. **Staging** — a review buffer. Confirmed scans, CSV imports, and manual adds
-   land here so you can eyeball them before they hit live inventory.
+   land here so you can eyeball them before they hit live inventory. Fields can
+   be set across a whole batch at once. See *Staging*.
 4. **Inventory** — the source of truth: one record per card + condition +
-   printing + language + bin. Adjust, split, merge, transfer, set overrides.
+   printing + language + bin. Filter it, read the purchase / market / listed
+   totals for whatever you filtered to, then adjust, split, merge, transfer, or
+   set overrides. See *Inventory*.
 5. **Pricing** — build per-game rules, simulate, and reprice.
 6. **Marketplaces / Lots / Orders** — push listings, build bulk lots, and
    fulfill sales.

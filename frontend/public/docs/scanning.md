@@ -7,7 +7,9 @@ Scanning turns folders of card images into recognized inventory. It's a
    (duplicates skipped), run through recognition, and dropped into a review
    queue.
 2. **Confirm** — you review what it identified, fix any wrong matches, then
-   confirm. Confirmed cards move to **Staging**, then to live inventory.
+   confirm. Confirmed cards move to **Staging**, then to live inventory. Cost
+   and acquired date are usually easiest to set there in one go, across the whole
+   batch — see *Staging*.
 
 ## What the "Scan folder" field wants
 

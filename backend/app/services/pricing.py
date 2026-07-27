@@ -143,6 +143,19 @@ def _pick_price_row(rows: list[PriceData], printing: str) -> PriceData:
     return matched[0] if matched else rows[0]
 
 
+def _market_from_rows(rows: list[PriceData], printing: str) -> float | None:
+    """Ordered-source fallback over already-loaded price rows for one product."""
+    if not rows:
+        return None
+    row = _pick_price_row(rows, printing)
+    for src in DEFAULT_CONFIG["sources"]:
+        field = SOURCE_FIELDS.get(src)
+        v = getattr(row, field, None) if field else None
+        if v is not None and v > 0:
+            return round(float(v), 2)
+    return None
+
+
 def card_market_value(db: Session, card, printing: str = "normal") -> float | None:
     """Headline market value for a catalog card, for at-a-glance triage.
 
@@ -154,16 +167,33 @@ def card_market_value(db: Session, card, printing: str = "normal") -> float | No
     """
     if card is None or not getattr(card, "tcgplayer_product_id", None):
         return None
-    rows = _price_rows(db, card.tcgplayer_product_id)
-    if not rows:
-        return None
-    row = _pick_price_row(rows, printing)
-    for src in DEFAULT_CONFIG["sources"]:
-        field = SOURCE_FIELDS.get(src)
-        v = getattr(row, field, None) if field else None
-        if v is not None and v > 0:
-            return round(float(v), 2)
-    return None
+    return _market_from_rows(_price_rows(db, card.tcgplayer_product_id), printing)
+
+
+def market_values_for_items(db: Session, items) -> dict[int, float | None]:
+    """card_market_value() for a whole result set, keyed by inventory id.
+
+    Batches the price lookup (one query per 500 products instead of one per
+    item) so a valuation over every filtered row stays cheap — price_data is
+    the biggest table in the DB. Items without a catalog card or price row map
+    to None, same as the single-item call.
+    """
+    product_ids = sorted({
+        it.card.tcgplayer_product_id for it in items
+        if it.card and it.card.tcgplayer_product_id
+    })
+    rows_by_product: dict[int, list[PriceData]] = {}
+    for i in range(0, len(product_ids), 500):  # chunked: SQLite caps bind params
+        chunk = product_ids[i:i + 500]
+        for row in db.execute(select(PriceData).where(
+                PriceData.tcgplayer_product_id.in_(chunk))).scalars():
+            rows_by_product.setdefault(row.tcgplayer_product_id, []).append(row)
+    values: dict[int, float | None] = {}
+    for it in items:
+        product_id = it.card.tcgplayer_product_id if it.card else None
+        values[it.id] = (_market_from_rows(rows_by_product.get(product_id, []), it.printing)
+                         if product_id else None)
+    return values
 
 
 def base_price(db: Session, item: InventoryItem, config: dict, trace: list) -> float | None:

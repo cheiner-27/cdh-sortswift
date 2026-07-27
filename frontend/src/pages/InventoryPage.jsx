@@ -5,15 +5,18 @@ import { Field, Modal, Msg, SortTh, useMeta, useMsg, useSort } from '../componen
 const EMPTY_FILTER = {
   q: '', game: '', set_code: '', condition: '', printing: '', bin: '',
   comment: '', in_stock_only: true, include_deleted: false,
-  price_min: '', price_max: '', age_min_days: '',
+  price_min: '', price_max: '', cost_min: '', cost_max: '',
+  age_min_days: '', age_max_days: '',
   marketplace: '', listing_status: '',
 }
+const NUMERIC_FILTERS = ['price_min', 'price_max', 'cost_min', 'cost_max',
+  'age_min_days', 'age_max_days']
 
 export default function InventoryPage() {
   const meta = useMeta()
   const [msg, ok, err] = useMsg()
   const [filter, setFilter] = useState(EMPTY_FILTER)
-  const [data, setData] = useState({ total: 0, items: [] })
+  const [data, setData] = useState({ total: 0, totals: null, items: [] })
   const { sorted, sort, toggle: sortBy } = useSort(data.items)
   const [selected, setSelected] = useState(new Set())
   const [detail, setDetail] = useState(null)
@@ -22,7 +25,7 @@ export default function InventoryPage() {
 
   const cleanFilter = () => {
     const f = { ...filter, with_age: true }
-    for (const k of ['price_min', 'price_max', 'age_min_days'])
+    for (const k of NUMERIC_FILTERS)
       f[k] = f[k] === '' ? undefined : Number(f[k])
     for (const k of Object.keys(f)) if (f[k] === '' || f[k] === undefined) delete f[k]
     return f
@@ -60,11 +63,21 @@ export default function InventoryPage() {
   }
 
   // Patch one row and update it in place (no full re-search) — used by the
-  // inline price-override editor.
+  // inline price-override editor. The listed-price total sits right next to that
+  // editor, so nudge it by this row's delta instead of leaving it stale.
   const patchItem = async (id, payload) => {
     try {
       await api.patch(`/api/inventory/${id}`, payload)
-      setData((d) => ({ ...d, items: d.items.map((i) => (i.id === id ? { ...i, ...payload } : i)) }))
+      setData((d) => {
+        const items = d.items.map((i) => (i.id === id ? { ...i, ...payload } : i))
+        const askOf = (i) => ((i.price_override ?? i.current_price) || 0) * i.quantity
+        const before = d.items.find((i) => i.id === id)
+        const after = items.find((i) => i.id === id)
+        const totals = d.totals && before && after
+          ? { ...d.totals, listed: Math.round((d.totals.listed - askOf(before) + askOf(after)) * 100) / 100 }
+          : d.totals
+        return { ...d, items, totals }
+      })
     } catch (e) { err(e) }
   }
 
@@ -101,8 +114,17 @@ export default function InventoryPage() {
             onChange={(e) => setFilter({ ...filter, price_min: e.target.value })} /></Field>
           <Field label="Price ≤"><input style={{ width: 60 }} value={filter.price_max}
             onChange={(e) => setFilter({ ...filter, price_max: e.target.value })} /></Field>
+          <Field label="Cost ≥"><input style={{ width: 60 }} value={filter.cost_min}
+            title="FIFO unit cost — what you paid for the oldest unit on hand"
+            onChange={(e) => setFilter({ ...filter, cost_min: e.target.value })} /></Field>
+          <Field label="Cost ≤"><input style={{ width: 60 }} value={filter.cost_max}
+            title="FIFO unit cost — what you paid for the oldest unit on hand"
+            onChange={(e) => setFilter({ ...filter, cost_max: e.target.value })} /></Field>
           <Field label="Age ≥ days"><input style={{ width: 60 }} value={filter.age_min_days}
             onChange={(e) => setFilter({ ...filter, age_min_days: e.target.value })} /></Field>
+          <Field label="Age ≤ days"><input style={{ width: 60 }} value={filter.age_max_days}
+            title="Days since the oldest unit was acquired. Rows with no acquisition history have no age and match neither age filter."
+            onChange={(e) => setFilter({ ...filter, age_max_days: e.target.value })} /></Field>
           <Field label="Marketplace"><select value={filter.marketplace} onChange={(e) => setFilter({ ...filter, marketplace: e.target.value })}>
             <option value="">—</option>{meta.marketplaces.map((m) => <option key={m}>{m}</option>)}</select></Field>
           <Field label="Listing status"><select value={filter.listing_status} onChange={(e) => setFilter({ ...filter, listing_status: e.target.value })}>
@@ -125,6 +147,24 @@ export default function InventoryPage() {
         </div>
         <Msg msg={msg} />
       </div>
+
+      {/* Roll-up over everything the current filter matches, not just the page. */}
+      {data.totals && (
+        <div className="stats">
+          <div className="stat">
+            <div className="value">{data.totals.units}</div>
+            <div className="label">Units · {data.total} record(s)</div></div>
+          <div className="stat" title="What the units on hand were bought for (remaining FIFO cost basis)">
+            <div className="value">{fmtMoney(data.totals.cost)}</div>
+            <div className="label">Purchase price</div></div>
+          <div className="stat" title="TCGplayer market value × quantity (reference, ignores condition)">
+            <div className="value">{fmtMoney(data.totals.market)}</div>
+            <div className="label">Market price</div></div>
+          <div className="stat" title="What you're asking: price override, else the auto price, × quantity">
+            <div className="value">{fmtMoney(data.totals.listed)}</div>
+            <div className="label">Listed price</div></div>
+        </div>
+      )}
 
       <div className="panel table-wrap"><table>
         <thead><tr>

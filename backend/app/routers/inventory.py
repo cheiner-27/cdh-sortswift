@@ -8,6 +8,7 @@ from ..models import (
     CatalogCard, CycleCount, CycleCountLine, InventoryItem, InventoryLog, utcnow,
 )
 from ..services import inventory as inv_svc
+from ..services import pricing
 from ..services import reports as report_svc
 from .serializers import inventory_dict
 
@@ -55,10 +56,45 @@ def filter_items(db: Session, params: dict) -> list[InventoryItem]:
         items = [i for i in items if (i.price_override or i.current_price or 0) >= params["price_min"]]
     if params.get("price_max") is not None:
         items = [i for i in items if (i.price_override or i.current_price or 0) <= params["price_max"]]
-    if params.get("age_min_days") is not None:
-        items = [i for i in items
-                 if (inv_svc.inventory_age_days(db, i) or -1) >= params["age_min_days"]]
+    # Cost and age both come from the FIFO batches — roll them up once for the
+    # whole set rather than querying per row.
+    if any(params.get(k) is not None
+           for k in ("cost_min", "cost_max", "age_min_days", "age_max_days")):
+        rollup = inv_svc.fifo_rollup(db, items)
+        if params.get("cost_min") is not None:
+            items = [i for i in items
+                     if (rollup[i.id]["unit_cost"] or 0.0) >= params["cost_min"]]
+        if params.get("cost_max") is not None:
+            items = [i for i in items
+                     if (rollup[i.id]["unit_cost"] or 0.0) <= params["cost_max"]]
+        # A row with no acquisition history has no age, so it satisfies neither
+        # bound (matching how age_min_days has always treated unknown age).
+        if params.get("age_min_days") is not None:
+            items = [i for i in items
+                     if (rollup[i.id]["age_days"] if rollup[i.id]["age_days"] is not None
+                         else -1) >= params["age_min_days"]]
+        if params.get("age_max_days") is not None:
+            items = [i for i in items if rollup[i.id]["age_days"] is not None
+                     and rollup[i.id]["age_days"] <= params["age_max_days"]]
     return items
+
+
+def _totals(db: Session, items: list[InventoryItem], rollup: dict) -> dict:
+    """Money roll-up over the WHOLE filtered set (not just the returned page).
+
+    - ``cost``: what the on-hand units were bought for (remaining FIFO basis).
+    - ``market``: TCGplayer market value — the reference sticker number.
+    - ``listed``: what we're asking (price override, else the auto price).
+    """
+    market = pricing.market_values_for_items(db, items)
+    listed = sum(((i.price_override if i.price_override is not None else i.current_price) or 0.0)
+                 * i.quantity for i in items)
+    return {
+        "units": sum(i.quantity for i in items),
+        "cost": round(sum(rollup[i.id]["cost_basis"] for i in items), 2),
+        "market": round(sum((market.get(i.id) or 0.0) * i.quantity for i in items), 2),
+        "listed": round(listed, 2),
+    }
 
 
 @router.post("/search")
@@ -68,12 +104,14 @@ def search(params: dict = Body(default={}), db: Session = Depends(get_db)):
     offset = params.get("offset", 0)
     page = items[offset:offset + limit]
     with_age = params.get("with_age", False)
+    rollup = inv_svc.fifo_rollup(db, items)
     return {
         "total": len(items),
+        "totals": _totals(db, items, rollup),
         "items": [inventory_dict(
             i,
-            age_days=inv_svc.inventory_age_days(db, i) if with_age else None,
-            fifo_cost=inv_svc.fifo_unit_cost(db, i) if with_age else None,
+            age_days=rollup[i.id]["age_days"] if with_age else None,
+            fifo_cost=rollup[i.id]["unit_cost"] if with_age else None,
         ) for i in page],
     }
 

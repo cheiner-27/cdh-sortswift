@@ -363,9 +363,72 @@ def inventory_age_days(db: Session, item: InventoryItem) -> int | None:
     oldest = oldest_acquisition_date(db, item)
     if oldest is None:
         return None
-    if oldest.tzinfo is None:
-        oldest = oldest.replace(tzinfo=timezone.utc)
-    return max(0, (datetime.now(timezone.utc) - oldest).days)
+    return max(0, (datetime.now(timezone.utc) - _as_utc(oldest)).days)
+
+
+def _as_utc(dt: datetime) -> datetime:
+    """SQLite hands back naive datetimes; treat them as the UTC they were stored as."""
+    return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+
+
+def _pool_key(row) -> tuple:
+    """The FIFO pool an item (or acquisition batch) belongs to.
+
+    Language and bin are deliberately NOT part of the key — see rekey_cost_basis.
+    """
+    return (row.catalog_card_id, row.custom_sku_id, row.condition, row.printing)
+
+
+def fifo_rollup(db: Session, items: list[InventoryItem]) -> dict[int, dict]:
+    """Per-item FIFO facts for a whole result set in ONE query.
+
+    Returns ``{item_id: {"unit_cost", "age_days", "cost_basis"}}``. ``unit_cost``
+    and ``age_days`` match fifo_unit_cost() / inventory_age_days() for a single
+    item — the batched form exists because those are a query each, which does
+    not scale to "value my whole inventory".
+
+    ``cost_basis`` is the remaining cost of *this item's* on-hand units: walk
+    the pool oldest-first and take ``quantity`` units. Allocation is shared
+    across the items handed in, because a pool spans bins and languages — two
+    bins of the same card+condition+printing draw on the same batches, so
+    valuing each one independently would count the same dollars twice.
+    """
+    keys = {_pool_key(it) for it in items}
+    pools: dict[tuple, list[AcquisitionLog]] = {}
+    if keys:
+        batches = db.execute(select(AcquisitionLog).where(
+            AcquisitionLog.quantity_remaining > 0)).scalars().all()
+        for batch in batches:
+            key = _pool_key(batch)
+            if key in keys:
+                pools.setdefault(key, []).append(batch)
+        for pool in pools.values():
+            pool.sort(key=lambda b: (_as_utc(b.acquired_at), b.id))
+
+    now = datetime.now(timezone.utc)
+    claimed: dict[int, int] = {}  # batch id -> units already assigned to an item
+    out: dict[int, dict] = {}
+    for item in sorted(items, key=lambda i: i.id):  # stable allocation order
+        pool = pools.get(_pool_key(item), [])
+        oldest = pool[0] if pool else None
+        needed = max(0, item.quantity)
+        cost_basis = 0.0
+        for batch in pool:
+            if needed <= 0:
+                break
+            take = min(batch.quantity_remaining - claimed.get(batch.id, 0), needed)
+            if take <= 0:
+                continue
+            claimed[batch.id] = claimed.get(batch.id, 0) + take
+            needed -= take
+            cost_basis += take * batch.unit_cost
+        out[item.id] = {
+            "unit_cost": oldest.unit_cost if oldest else None,
+            "age_days": (max(0, (now - _as_utc(oldest.acquired_at)).days)
+                         if oldest else None),
+            "cost_basis": round(cost_basis, 2),
+        }
+    return out
 
 
 def transfer_bin(db: Session, item: InventoryItem, new_bin: str,

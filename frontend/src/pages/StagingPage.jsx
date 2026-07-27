@@ -2,6 +2,11 @@ import React, { useEffect, useState } from 'react'
 import { api, fmtMoney, scanImageUrl } from '../api.js'
 import { CardSearch, Field, Modal, Msg, SortTh, useMeta, useMsg, useSort } from '../components.jsx'
 
+const EMPTY_BULK = {
+  acquired_at: '', cost: '', price: '', bin: '',
+  condition: '', printing: '', language: '', quantity: '',
+}
+
 export default function StagingPage() {
   const meta = useMeta()
   const [msg, ok, err] = useMsg()
@@ -9,6 +14,7 @@ export default function StagingPage() {
   const { sorted, sort, toggle: sortBy } = useSort(rows)
   const [source, setSource] = useState('')
   const [selected, setSelected] = useState(new Set())
+  const [bulkSet, setBulkSet] = useState(EMPTY_BULK)
   const [showAdd, setShowAdd] = useState(false)
   const [simResults, setSimResults] = useState(null)
   const [piles, setPiles] = useState([])
@@ -26,6 +32,21 @@ export default function StagingPage() {
   const patch = async (id, payload) => {
     const updated = await api.patch(`/api/staging/${id}`, payload)
     setRows((list) => list.map((r) => (r.id === id ? updated : r)))
+  }
+
+  // Same field on every selected row — mostly for stamping one purchase
+  // date/cost across a batch that came in together. Blanks are left alone, and
+  // the form keeps its values so the next selection can reuse them.
+  const applyBulk = async () => {
+    const set = {}
+    for (const [k, v] of Object.entries(bulkSet)) if (v !== '') set[k] = v
+    if (!Object.keys(set).length) { err(new Error('Fill at least one field first')); return }
+    try {
+      const res = await api.post('/api/staging/bulk-edit', { ids: [...selected], set })
+      const byId = new Map(res.rows.map((r) => [r.id, r]))
+      setRows((list) => list.map((r) => byId.get(r.id) || r))
+      ok(`Updated ${res.updated} row(s): ${Object.keys(set).join(', ')}`)
+    } catch (e) { err(e) }
   }
 
   const approve = async (all) => {
@@ -68,6 +89,35 @@ export default function StagingPage() {
       </div>
       <Msg msg={msg} />
 
+      {selected.size > 0 && (
+        <div className="panel">
+          <div className="row center">
+            <b style={{ fontSize: 13 }}>Set on {selected.size} selected:</b>
+            <input type="date" style={{ width: 130 }} value={bulkSet.acquired_at}
+              title="Acquired — original purchase date for the whole batch (drives FIFO age)"
+              onChange={(e) => setBulkSet({ ...bulkSet, acquired_at: e.target.value })} />
+            <input placeholder="cost" style={{ width: 60 }} value={bulkSet.cost}
+              title="Per-card purchase price. Skipped on rows pulled from a bulk pile."
+              onChange={(e) => setBulkSet({ ...bulkSet, cost: e.target.value })} />
+            <input placeholder="price" style={{ width: 60 }} value={bulkSet.price}
+              onChange={(e) => setBulkSet({ ...bulkSet, price: e.target.value })} />
+            <input placeholder="bin" style={{ width: 65 }} value={bulkSet.bin}
+              onChange={(e) => setBulkSet({ ...bulkSet, bin: e.target.value })} />
+            <select value={bulkSet.condition} onChange={(e) => setBulkSet({ ...bulkSet, condition: e.target.value })}>
+              <option value="">cond…</option>{meta.conditions.map((c) => <option key={c}>{c}</option>)}</select>
+            <select value={bulkSet.printing} onChange={(e) => setBulkSet({ ...bulkSet, printing: e.target.value })}>
+              <option value="">printing…</option>{meta.printings.map((p) => <option key={p}>{p}</option>)}</select>
+            <select value={bulkSet.language} onChange={(e) => setBulkSet({ ...bulkSet, language: e.target.value })}>
+              <option value="">lang…</option>{meta.languages.map((l) => <option key={l}>{l}</option>)}</select>
+            <input placeholder="qty" style={{ width: 50 }} value={bulkSet.quantity}
+              onChange={(e) => setBulkSet({ ...bulkSet, quantity: e.target.value })} />
+            <button className="primary" onClick={applyBulk}>Apply</button>
+            <button className="small" onClick={() => setBulkSet(EMPTY_BULK)}>Clear form</button>
+            <span className="muted" style={{ fontSize: 12 }}>Blank fields are left alone.</span>
+          </div>
+        </div>
+      )}
+
       <div className="panel table-wrap"><table>
         <thead><tr>
           <th><input type="checkbox" checked={selected.size === rows.length && rows.length > 0}
@@ -103,22 +153,23 @@ export default function StagingPage() {
               {meta.printings.map((p) => <option key={p}>{p}</option>)}</select></td>
             <td><select value={r.language} onChange={(e) => patch(r.id, { language: e.target.value })}>
               {meta.languages.map((l) => <option key={l}>{l}</option>)}</select></td>
-            <td><input style={{ width: 70 }} defaultValue={r.bin}
+            <td><input key={`bin-${r.id}-${r.bin}`} style={{ width: 70 }} defaultValue={r.bin}
               onBlur={(e) => e.target.value !== r.bin && patch(r.id, { bin: e.target.value })} /></td>
-            <td><input type="number" min="1" style={{ width: 55 }} defaultValue={r.quantity}
+            <td><input key={`qty-${r.id}-${r.quantity}`} type="number" min="1" style={{ width: 55 }} defaultValue={r.quantity}
               onBlur={(e) => patch(r.id, { quantity: Number(e.target.value) || 1 })} /></td>
             <td>{r.source_bulk_id
               ? <span className="muted" title="Cost comes from the bulk pile this card is pulled from">(from bulk)</span>
-              : <input style={{ width: 65 }} defaultValue={r.cost ?? ''}
+              : <input key={`cost-${r.id}-${r.cost ?? ''}`} style={{ width: 65 }} defaultValue={r.cost ?? ''}
                   onBlur={(e) => patch(r.id, { cost: e.target.value === '' ? null : Number(e.target.value) })} />}</td>
-            <td><input type="date" style={{ width: 130 }} defaultValue={r.acquired_at ? r.acquired_at.slice(0, 10) : ''}
+            <td><input key={`acq-${r.id}-${r.acquired_at ?? ''}`} type="date" style={{ width: 130 }}
+              defaultValue={r.acquired_at ? r.acquired_at.slice(0, 10) : ''}
               onBlur={(e) => patch(r.id, { acquired_at: e.target.value || null })} title="Original purchase date (drives FIFO age)" /></td>
             <td style={{ whiteSpace: 'nowrap' }} title="TCGplayer market value (reference)">
               {r.market_value == null ? <span className="muted">—</span>
                 : <span style={{ color: r.market_value >= 2 ? 'var(--green)' : 'var(--muted)' }}>{fmtMoney(r.market_value)}</span>}</td>
-            <td><input style={{ width: 65 }} defaultValue={r.price ?? ''}
+            <td><input key={`price-${r.id}-${r.price ?? ''}`} style={{ width: 65 }} defaultValue={r.price ?? ''}
               onBlur={(e) => patch(r.id, { price: e.target.value === '' ? null : Number(e.target.value) })} /></td>
-            <td><input style={{ width: 130 }} defaultValue={r.comment}
+            <td><input key={`cmt-${r.id}-${r.comment}`} style={{ width: 130 }} defaultValue={r.comment}
               onBlur={(e) => e.target.value !== r.comment && patch(r.id, { comment: e.target.value })} /></td>
           </tr>))}
         </tbody>

@@ -1,0 +1,58 @@
+# Staging
+
+Staging is the review buffer between intake and live inventory. Confirmed scans,
+CSV imports, and manual adds land here so nothing hits inventory unreviewed.
+
+Nothing in staging exists as stock yet. **Approve** commits it; **Reject**
+permanently discards the row (it is never added to inventory).
+
+## Fixing rows
+
+Every field is editable in place — condition, printing, language, bin, quantity,
+cost, acquired date, price, comment. Edits save when you leave the field.
+
+**Acquired** is the original purchase date, not today. It drives FIFO age, so
+setting it correctly on migrated or late-entered stock keeps aging reports honest.
+Left blank, the row ages from the moment you approve it.
+
+## Setting a field across a batch
+
+Tick the rows you want (or the header checkbox for all), and a **Set on N
+selected** bar appears above the table: acquired date, cost, price, bin,
+condition, printing, language, quantity.
+
+Fill only the fields you want to change and hit **Apply** — blanks are left
+alone, so this never wipes a value. It's the fast path for the usual case: a box
+of cards bought together on one date at one per-card cost.
+
+The bar keeps your values after applying, so you can select the next group and
+hit Apply again. **Clear form** empties it.
+
+> To *clear* a field rather than set it, edit that row directly — a blank in the
+> bulk bar means "don't touch", not "erase".
+
+## Cards pulled from a bulk pile
+
+A row tagged **⟵ from *pile*** came out of a bulk pile. On approve it is *pulled
+out* of that pile — decrementing it and carrying its per-card cost and
+acquisition age across — instead of being counted as a fresh purchase.
+
+Those rows show `(from bulk)` instead of a cost box, and a batch-wide cost from
+the bulk bar skips them on purpose. Every other field still applies.
+
+## Approving
+
+- **Approve selected** — partial approval. Push some rows live now, leave the
+  rest staged.
+- **Approve all** — everything currently listed, ignoring your selection.
+- **Reject selected** — discards permanently, after a confirmation.
+
+**Reprice preview (eBay)** runs the pricing engine in simulation mode so you can
+see what your rules would do before anything goes live. See *Pricing rules*.
+
+## Adding cards by hand
+
+**+ Add cards** searches the catalog and builds rows one card at a time, with its
+own *apply to all* shortcut for printing / language / quantity / price / cost /
+bin / acquired date. Tick **skip staging** to write straight to live inventory
+when the intake is already trusted.

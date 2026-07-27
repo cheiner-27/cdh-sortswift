@@ -59,6 +59,46 @@ def edit_row(row_id: int, payload: dict = Body(...), db: Session = Depends(get_d
     return _staging_dict(db, row)
 
 
+def _num(value, field: str) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        raise HTTPException(400, f"{field} must be a number")
+
+
+@router.post("/bulk-edit")
+def bulk_edit(payload: dict = Body(...), db: Session = Depends(get_db)):
+    """Set the same field(s) on many staged rows at once.
+
+    The bread-and-butter case is one purchase date + cost for a whole batch that
+    came in together. Only keys present in ``set`` are touched, and blank values
+    are dropped by the caller, so this never clears a field — per-row editing
+    handles exceptions and clears.
+    """
+    ids = payload.get("ids") or []
+    changes = {k: v for k, v in (payload.get("set") or {}).items() if v not in ("", None)}
+    if not ids or not changes:
+        return {"updated": 0, "rows": []}
+    rows = db.execute(select(StagingItem).where(
+        StagingItem.id.in_(ids))).scalars().all()
+    for row in rows:
+        for f in ("condition", "printing", "language", "bin", "comment"):
+            if f in changes:
+                setattr(row, f, changes[f])
+        if "quantity" in changes:
+            row.quantity = max(1, int(_num(changes["quantity"], "quantity")))
+        if "price" in changes:
+            row.price = _num(changes["price"], "price")
+        # Cost on a bulk-pull row is ignored at approve time (the cost comes
+        # from the pile it's pulled out of), so don't pretend to set it.
+        if "cost" in changes and not row.source_bulk_id:
+            row.cost = _num(changes["cost"], "cost")
+        if "acquired_at" in changes:
+            row.acquired_at = _parse_date(changes["acquired_at"])
+    db.commit()
+    return {"updated": len(rows), "rows": [_staging_dict(db, r) for r in rows]}
+
+
 @router.post("/approve")
 def approve(payload: dict = Body(...), db: Session = Depends(get_db)):
     """Approve some or all staged rows (partial approval supported)."""

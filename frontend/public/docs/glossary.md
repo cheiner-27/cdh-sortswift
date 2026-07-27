@@ -50,6 +50,12 @@ you'll list there (cap 0 = exclude, "in-store only").
 **FIFO** — first-in-first-out costing. Cost basis and inventory age come from
 acquisition batches, consumed oldest-first when you sell.
 
+**Purchase / market / listed** — the three money totals on the Inventory screen,
+all for whatever the current filter matches. *Purchase* is what you paid
+(remaining FIFO cost basis), *market* is TCGplayer market value × quantity (a
+reference number that ignores condition and your rules), *listed* is what you're
+asking (override, else the auto price) × quantity.
+
 **Staging** — the review buffer between intake (scan/import/manual add) and live
 inventory. Nothing is live until approved.
 

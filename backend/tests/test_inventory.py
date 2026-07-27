@@ -54,6 +54,47 @@ def test_fifo_restore_on_order_reversal(db, card):
     assert cogs2 == 10.00
 
 
+def test_fifo_rollup_matches_per_item_helpers(db, card):
+    item = inv.find_or_create_item(db, catalog_card_id=card.id, bin="A")
+    old = datetime.now(timezone.utc) - timedelta(days=40)
+    inv.add_stock(db, item, 2, 1.00, acquired_at=old)
+    inv.add_stock(db, item, 3, 5.00)
+    db.commit()
+    roll = inv.fifo_rollup(db, [item])[item.id]
+    assert roll["unit_cost"] == inv.fifo_unit_cost(db, item) == 1.00
+    assert roll["age_days"] == inv.inventory_age_days(db, item) == 40
+    assert roll["cost_basis"] == 2 * 1.00 + 3 * 5.00  # all 5 on-hand units
+
+
+def test_fifo_rollup_shares_a_pool_across_bins(db, card):
+    # Same card+condition+printing in two bins = one FIFO pool. Valuing them
+    # independently would count the same batches twice.
+    a = inv.find_or_create_item(db, catalog_card_id=card.id, bin="A")
+    b = inv.find_or_create_item(db, catalog_card_id=card.id, bin="B")
+    inv.add_stock(db, a, 2, 3.00)
+    inv.add_stock(db, b, 2, 4.00)
+    db.commit()
+    roll = inv.fifo_rollup(db, [a, b])
+    total_basis = sum(r["cost_basis"] for r in roll.values())
+    assert total_basis == 2 * 3.00 + 2 * 4.00  # pool total, not doubled
+    assert roll[a.id]["cost_basis"] == 6.00     # oldest batch went to the lower id
+    assert roll[b.id]["cost_basis"] == 8.00
+
+
+def test_fifo_rollup_handles_missing_and_partial_cost_history(db, card):
+    # Migrated stock with no acquisition batches, and a row holding more units
+    # than the pool has cost for.
+    bare = inv.find_or_create_item(db, catalog_card_id=card.id, bin="Z")
+    inv.apply_delta(db, bare, 4)  # quantity without a cost batch
+    short = inv.find_or_create_item(db, catalog_card_id=card.id, condition="LP", bin="Z")
+    inv.add_stock(db, short, 1, 2.00)
+    inv.apply_delta(db, short, 3)  # 4 on hand, cost basis for 1
+    db.commit()
+    roll = inv.fifo_rollup(db, [bare, short])
+    assert roll[bare.id] == {"unit_cost": None, "age_days": None, "cost_basis": 0.0}
+    assert roll[short.id]["cost_basis"] == 2.00
+
+
 def test_effective_quantity_reserves_and_caps(db, card):
     item = inv.find_or_create_item(db, catalog_card_id=card.id, bin="A")
     inv.add_stock(db, item, 10, 1.00)

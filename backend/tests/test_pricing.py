@@ -98,6 +98,33 @@ def test_card_market_value_none_without_price_data(db):
     assert pricing.card_market_value(db, None, "normal") is None
 
 
+def test_market_values_for_items_matches_single_lookup(db, card):
+    from app.models import CatalogCard, CustomProduct, CustomSku
+    normal = make_item(db, card, printing="normal")
+    foil = make_item(db, card, printing="foil")
+    unpriced_card = CatalogCard(game="mtg", external_id="batch-no-price",
+                                tcgplayer_product_id=888, set_code="X",
+                                collector_number="2", name="Unpriced",
+                                finishes=["normal"], languages=["en"])
+    db.add(unpriced_card)
+    db.commit()
+    unpriced = make_item(db, unpriced_card)
+    product = CustomProduct(category="sealed", name="Sealed box", item_type="sealed")
+    db.add(product)
+    db.flush()
+    sku = CustomSku(product_id=product.id)
+    db.add(sku)
+    db.flush()
+    noncatalog = inv.find_or_create_item(db, custom_sku_id=sku.id, bin="A")
+    db.commit()
+
+    values = pricing.market_values_for_items(db, [normal, foil, unpriced, noncatalog])
+    assert values[normal.id] == pricing.card_market_value(db, card, "normal") == 10.0
+    assert values[foil.id] == pricing.card_market_value(db, card, "foil") == 25.0
+    assert values[unpriced.id] is None   # catalog card with no price rows
+    assert values[noncatalog.id] is None  # custom item, no catalog card
+
+
 def test_platform_offsets_differ(db, card):
     c = cfg()
     c["tiers"][0]["offsets"]["ebay"] = {"pct": 20, "flat": 0}

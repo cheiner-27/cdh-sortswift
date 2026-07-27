@@ -6,6 +6,8 @@ import React, { useEffect, useState } from 'react'
 const DOCS = [
   ['overview', 'Overview'],
   ['scanning', 'Scanning'],
+  ['staging', 'Staging'],
+  ['inventory', 'Inventory'],
   ['pricing', 'Pricing rules'],
   ['catalog-sync', 'Catalog & price sync'],
   ['exports-imports', 'Exports & imports'],
