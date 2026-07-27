@@ -550,6 +550,7 @@ class Order(Base):
     shipping_cost: Mapped[float] = mapped_column(Float, default=0.0)  # what we paid (label)
     shipping_charged: Mapped[float] = mapped_column(Float, default=0.0)  # what the buyer paid us for shipping (revenue)
     amount_refunded: Mapped[float] = mapped_column(Float, default=0.0)  # refunded to buyer (partial or full)
+    fees_refunded: Mapped[float] = mapped_column(Float, default=0.0)  # fees the marketplace credited back
     return_shipping_cost: Mapped[float] = mapped_column(Float, default=0.0)  # what we paid to get it back
     tracking_number: Mapped[str | None] = mapped_column(String, nullable=True)
     carrier: Mapped[str | None] = mapped_column(String, nullable=True)

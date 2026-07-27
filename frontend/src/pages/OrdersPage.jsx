@@ -6,9 +6,11 @@ const today = () => new Date().toISOString().slice(0, 10)
 
 // Total FIFO cost booked against an order (0 until the sale is deducted).
 const orderCogs = (o) => o.items.reduce((s, i) => s + (i.cogs || 0), 0)
-// Net profit = revenue + shipping charged − refunds − COGS − shipping paid − fees.
+// Net profit = revenue + shipping charged − refunds − COGS − shipping paid − fees
+// you actually ate (fees credited back on a refund aren't a cost).
 const orderNet = (o) => o.order_total + (o.shipping_charged || 0) - (o.amount_refunded || 0)
-  - orderCogs(o) - (o.shipping_cost || 0) - (o.return_shipping_cost || 0) - (o.marketplace_fees || 0)
+  - orderCogs(o) - (o.shipping_cost || 0) - (o.return_shipping_cost || 0)
+  - ((o.marketplace_fees || 0) - (o.fees_refunded || 0))
 const money = (n) => ({ color: n >= 0 ? 'var(--green)' : 'var(--red)' })
 
 export default function OrdersPage() {
@@ -139,6 +141,7 @@ export default function OrdersPage() {
               {o.shipping_cost > 0 && <div className="muted">ship {fmtMoney(o.shipping_cost)}</div>}
               {o.marketplace_fees > 0 && <div className="muted">fees {fmtMoney(o.marketplace_fees)}</div>}
               {o.amount_refunded > 0 && <div style={{ color: 'var(--red)' }}>refunded {fmtMoney(o.amount_refunded)}</div>}
+              {o.fees_refunded > 0 && <div style={{ color: 'var(--green)' }}>fees back {fmtMoney(o.fees_refunded)}</div>}
               {o.return_shipping_cost > 0 && <div className="muted">ret. ship {fmtMoney(o.return_shipping_cost)}</div>}</td>
             <td><b style={money(orderNet(o))}>{fmtMoney(orderNet(o))}</b>
               {o.deduction_applied
@@ -357,25 +360,38 @@ function RefundModal({ order, onClose }) {
   const [amount, setAmount] = useState('')
   const [returned, setReturned] = useState(true)
   const [returnShipping, setReturnShipping] = useState('')
+  const fees = order.marketplace_fees || 0
+  // TCGplayer credits selling fees back on a refund, so default to the full fee.
+  const [feesRefunded, setFeesRefunded] = useState(fees ? fees.toFixed(2) : '')
   const alreadyRefunded = order.amount_refunded || 0
-  const remaining = (order.order_total - alreadyRefunded).toFixed(2)
+  // Shipping the buyer paid is revenue too, so it's refundable alongside the items.
+  const refundable = order.order_total + (order.shipping_charged || 0)
+  const remaining = (refundable - alreadyRefunded).toFixed(2)
+  // Lines with no inventory record behind them (migrated sales) can't be restocked.
+  const unlinked = order.items.filter((i) => !i.inventory_id).length
 
   const submit = async () => {
     try {
       const body = mode === 'partial'
         ? { mode: 'partial', amount: Number(amount) }
-        : { mode: 'full', returned, return_shipping: Number(returnShipping) || 0 }
+        : {
+          mode: 'full', returned, return_shipping: Number(returnShipping) || 0,
+          fees_refunded: Number(feesRefunded) || 0,
+        }
       const r = await api.post(`/api/orders/${order.id}/refund`, body)
+      const stranded = (r.unlinked_lines || []).length
       ok(mode === 'partial'
         ? `Partial refund recorded (total refunded ${fmtMoney(r.amount_refunded)})`
-        : `Full refund — ${r.restocked ? 'item returned, restocked' : 'item NOT returned, written off'}`)
-      setTimeout(onClose, 700)
+        : `Full refund — ${r.restocked ? 'item returned, COGS backed out' : 'item NOT returned, written off'}`
+          + (stranded ? ` · ${stranded} line(s) had no inventory record — re-add that stock by hand to re-list it` : ''))
+      setTimeout(onClose, stranded ? 2500 : 700)
     } catch (e) { err(e) }
   }
   return (
     <Modal title={`Refund — order ${order.external_order_id}`} onClose={onClose}>
       <p className="muted" style={{ marginTop: 0 }}>
-        Order total {fmtMoney(order.order_total)}
+        Refundable {fmtMoney(refundable)} (items {fmtMoney(order.order_total)}
+        {order.shipping_charged > 0 && <> + shipping charged {fmtMoney(order.shipping_charged)}</>})
         {alreadyRefunded > 0 && <> · already refunded {fmtMoney(alreadyRefunded)} · {fmtMoney(remaining)} left</>}
       </p>
       <div className="row center">
@@ -387,7 +403,8 @@ function RefundModal({ order, onClose }) {
         <div className="row center">
           <Field label={`Amount to refund the buyer ($, ≤ ${remaining})`}>
             <input style={{ width: 90 }} value={amount} onChange={(e) => setAmount(e.target.value)} /></Field>
-          <span className="muted">Reduces net revenue; inventory unchanged.</span>
+          <span className="muted">Reduces net revenue and credits back a pro-rata
+            slice of the selling fees; inventory and COGS unchanged.</span>
         </div>
       ) : (
         <>
@@ -396,14 +413,27 @@ function RefundModal({ order, onClose }) {
           </div>
           <p className="muted" style={{ fontSize: 12 }}>
             {returned
-              ? 'Restocks the card (+qty) and reverses its COGS — nets to ~0 minus any return shipping.'
+              ? 'Backs the COGS out of this sale so the cost follows the card to whichever sale sticks — the refunded sale is left showing only the shipping you ate.'
               : 'Write-off: the card does NOT come back; inventory stays deducted and its cost remains a loss.'}
           </p>
+          {returned && unlinked > 0 && (
+            <p className="muted" style={{ fontSize: 12, color: 'var(--yellow)' }}>
+              {unlinked} line(s) on this order have no inventory record (migrated sale) — the
+              COGS is backed out, but the card is NOT auto-restocked. Re-add that stock on the
+              Inventory page before re-listing it.
+            </p>)}
           {returned && (
             <div className="row center">
               <Field label="Return shipping you paid ($)"><input style={{ width: 90 }}
                 value={returnShipping} onChange={(e) => setReturnShipping(e.target.value)} /></Field>
             </div>)}
+          <div className="row center">
+            <Field label={`Selling fees credited back ($ of ${fmtMoney(fees)} charged)`}>
+              <input style={{ width: 90 }} value={feesRefunded}
+                onChange={(e) => setFeesRefunded(e.target.value)} /></Field>
+            <span className="muted" style={{ fontSize: 12 }}>
+              TCGplayer refunds these in full; set to 0 if the marketplace kept them.</span>
+          </div>
         </>
       )}
       <div className="row center">

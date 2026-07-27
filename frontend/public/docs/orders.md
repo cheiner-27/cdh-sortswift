@@ -39,15 +39,35 @@ feeding straight into Reports → P&L.
 The **Refund…** button on a shipped order handles the full range:
 
 - **Partial refund** — refund part of the total to the buyer. Reduces net revenue
-  and profit; inventory is untouched. The order shows as *partially refunded* and
-  can be refunded again up to the total.
-- **Full refund** — refund the whole total, with a **"item returned to me?"**
+  and profit, and credits back a pro-rata slice of the selling fees; inventory and
+  COGS are untouched. The order shows as *partially refunded* and can be refunded
+  again up to the refundable total.
+- **Full refund** — refunds the **items plus the shipping the buyer paid you**
+  (both are revenue, so both come back out), with an **"item returned to me?"**
   choice:
-  - **returned** → the card is restocked (+qty) and its COGS reversed, so the
-    sale nets to ~0 minus any **return shipping** you paid (capture it in the
-    dialog).
+  - **returned** → the card's COGS is backed out of this sale, so the cost follows
+    the card and lands on whichever sale actually sticks. The refunded sale is left
+    showing only what you really ate: outbound shipping plus any **return
+    shipping** you paid (capture it in the dialog). If the line is linked to an
+    inventory record the card is also restocked (+qty) automatically.
   - **not returned** → a write-off: the card does not come back, inventory stays
     deducted, and its cost remains a real loss.
+
+**Selling fees credited back.** TCGplayer returns the selling fees on a refund, so
+the dialog pre-fills the full fee and P&L only counts the fees you actually ate.
+Set it to `0` (or any partial amount) for a marketplace that keeps them.
+
+**Why the refunded sale shouldn't carry the COGS.** If the cost stayed expensed on
+a refunded sale, the card sitting back in your inventory would have no cost basis:
+inventory-at-cost would understate, the aging report would value it at $0, and the
+eventual resale would show a fake 100% margin. Backing it out means a
+sell → refund → resell cycle expenses the card's cost exactly once.
+
+**Migrated sales have no inventory link.** Historical orders imported from Airtable
+carry their COGS on the order line with no live inventory record behind them. A
+refund still backs the COGS out correctly, but it **cannot auto-restock** the card —
+the dialog warns you, and you re-add that stock on the Inventory page before
+re-listing it.
 
 ### Supplier refunds (a refund to *you* on a purchase)
 
@@ -59,4 +79,5 @@ These live on **Inventory → Detail → Supplier refund / return**, not on orde
   their cost recovered (no P&L hit).
 
 All refunds are logged, and Reports → P&L nets everything out:
-`profit = revenue − refunds − COGS − shipping (incl. returns) − fees`.
+`profit = revenue − refunds − COGS − shipping (incl. returns) − fees kept`,
+where *fees kept* is what you were charged minus what was credited back.

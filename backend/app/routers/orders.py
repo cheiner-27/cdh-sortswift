@@ -82,17 +82,20 @@ def mark_shipped(order_id: int, payload: dict = Body(default={}),
 @router.post("/{order_id}/refund")
 def refund(order_id: int, payload: dict = Body(default={}),
            db: Session = Depends(get_db)):
-    """Refund a customer. Body: {mode: full|partial, amount, returned, return_shipping}.
-    Defaults to a full refund with the item returned (restock)."""
+    """Refund a customer. Body: {mode: full|partial, amount, returned,
+    return_shipping, fees_refunded}. Defaults to a full refund with the item
+    returned (restock) and the marketplace fees credited back in full."""
     o = db.get(Order, order_id)
     if not o:
         raise HTTPException(404)
+    fees = payload.get("fees_refunded")
     try:
         return order_svc.refund_sale(
             db, o, mode=payload.get("mode", "full"),
             amount=payload.get("amount"),
             returned=payload.get("returned", True),
-            return_shipping=float(payload.get("return_shipping") or 0))
+            return_shipping=float(payload.get("return_shipping") or 0),
+            fees_refunded=None if fees is None else float(fees))
     except ValueError as e:
         raise HTTPException(400, str(e))
 

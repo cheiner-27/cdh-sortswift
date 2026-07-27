@@ -98,6 +98,9 @@ def ensure_schema() -> None:
             if "shipping_charged" not in ocols:
                 conn.execute(text(
                     "ALTER TABLE orders ADD COLUMN shipping_charged FLOAT DEFAULT 0.0"))
+            if "fees_refunded" not in ocols:
+                conn.execute(text(
+                    "ALTER TABLE orders ADD COLUMN fees_refunded FLOAT DEFAULT 0.0"))
 
     # 4) staging: preserve original acquisition date through the review buffer.
     if "staging" in tables:

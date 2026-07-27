@@ -20,9 +20,9 @@ def realized_pnl(db: Session, *, group_by: str = "month",
         profit = revenue − refunds − COGS − shipping − fees
 
     Fulfilled orders count even after a refund: a partial refund reduces net
-    revenue; a full refund with the item returned nets to ~0 (revenue and COGS
-    both back out) minus any return shipping; a full refund with the item NOT
-    returned leaves the COGS as a real loss.
+    revenue; a full refund with the item returned nets to the shipping you ate
+    (revenue, COGS and refunded fees all back out); a full refund with the item
+    NOT returned leaves the COGS as a real loss.
 
     When grouping by game/set an order can span several groups: each line's COGS
     and units land in its own group, and the order-level costs (fees, shipping,
@@ -46,7 +46,9 @@ def realized_pnl(db: Session, *, group_by: str = "month",
         order_revenue = order.order_total + (order.shipping_charged or 0.0)
         order_refunds = order.amount_refunded or 0.0
         order_shipping = order.shipping_cost + (order.return_shipping_cost or 0.0)
-        order_fees = order.marketplace_fees
+        # Only the fees we actually ate are a cost — TCGplayer credits selling
+        # fees back on a refund, so a refunded sale shouldn't carry them.
+        order_fees = order.marketplace_fees - (order.fees_refunded or 0.0)
 
         if group_by in ("game", "set"):
             # One order can span several games/sets. Attribute each line's COGS

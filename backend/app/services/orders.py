@@ -208,45 +208,86 @@ def mark_shipped(db: Session, order: Order, tracking_number: str | None = None,
     return {"status": "shipped", "warnings": warnings}
 
 
+def refundable_total(order: Order) -> float:
+    """The most a buyer can be credited back: the item subtotal plus whatever
+    they paid us for shipping. Both are revenue, so both have to be refundable
+    for a full refund to zero out the sale."""
+    return round(order.order_total + (order.shipping_charged or 0.0), 2)
+
+
 def refund_sale(db: Session, order: Order, *, mode: str = "full",
                 amount: float | None = None, returned: bool = True,
-                return_shipping: float = 0.0) -> dict:
+                return_shipping: float = 0.0,
+                fees_refunded: float | None = None) -> dict:
     """Refund a customer on a sale. Two modes:
 
     - ``partial`` — refund `amount` to the buyer; inventory and COGS are
       untouched, the sale stays live but with reduced net revenue. Accumulates
       across multiple partial refunds.
-    - ``full`` — refund the whole order_total. If ``returned`` the card comes
-      back: inventory is restored (+qty) and its FIFO consumption reversed
-      (COGS → 0). If not returned it's a write-off: inventory stays deducted and
-      the COGS remains a real loss. ``return_shipping`` (what you paid to get the
-      card back) is captured as an expense.
+    - ``full`` — refund the whole ``refundable_total`` (item subtotal + the
+      shipping the buyer paid). If ``returned`` the card comes back: inventory is
+      restored (+qty) and its COGS backed out to 0, so the cost follows the card
+      and lands on whichever sale actually sticks. If not returned it's a
+      write-off: inventory stays deducted and the COGS remains a real loss.
+      ``return_shipping`` (what you paid to get the card back) is captured as an
+      expense.
+
+    ``fees_refunded`` is what the marketplace credited back in selling fees —
+    TCGplayer returns them on a refund, so it defaults to the full fee on a full
+    refund and pro-rata on a partial. Pass an explicit value for a marketplace
+    that keeps part of the fee.
+
+    Returns ``unlinked_lines``: lines whose COGS was backed out but which have no
+    inventory record to restock (migrated/historical sales). Those cards have to
+    be re-added by hand before they can be re-listed.
     """
+    max_refund = refundable_total(order)
     if mode == "partial":
         amt = round(float(amount or 0), 2)
         already = order.amount_refunded or 0.0
         if amt <= 0:
             raise ValueError("partial refund amount must be positive")
-        if already + amt > order.order_total + 1e-9:
+        if already + amt > max_refund + 1e-9:
             raise ValueError("total refunded would exceed the order total — "
                              "use a full refund instead")
         order.amount_refunded = round(already + amt, 2)
+        # Fees scale with what the buyer actually kept, so a partial refund gets
+        # back a pro-rata slice of them.
+        if fees_refunded is None:
+            share = (order.amount_refunded / max_refund) if max_refund else 0.0
+            order.fees_refunded = round((order.marketplace_fees or 0.0) * share, 2)
+        else:
+            order.fees_refunded = round(float(fees_refunded), 2)
         if order.status not in ("refunded",):
             order.status = "partially_refunded"
         db.commit()
         return {"status": order.status, "amount_refunded": order.amount_refunded,
-                "restocked": False}
+                "fees_refunded": order.fees_refunded, "restocked": False,
+                "unlinked_lines": []}
 
     # full refund
-    order.amount_refunded = order.order_total
+    order.amount_refunded = max_refund
+    order.fees_refunded = round(
+        float(fees_refunded) if fees_refunded is not None
+        else (order.marketplace_fees or 0.0), 2)
     if return_shipping:
         order.return_shipping_cost = round((order.return_shipping_cost or 0.0)
                                            + float(return_shipping), 2)
     restocked = False
+    unlinked: list[str] = []
     if returned:
         reverse_order_deduction(db, order, cause="refund",
                                 comment=f"full refund + return {order.external_order_id}")
         restocked = True
+        # Migrated/historical lines carry their COGS on the line with no
+        # inventory record behind them, so the reversal above skips them. The
+        # card still came back, so its cost must not stay expensed here — back it
+        # out and report the line so the user can re-add the stock by hand.
+        for line in order.items:
+            if line.inventory_id or not line.cogs:
+                continue
+            unlinked.append(line.description or f"line {line.id}")
+            line.cogs = 0.0
     else:
         # write-off: leave inventory deducted; the COGS on each line stays a loss.
         for line in order.items:
@@ -258,7 +299,9 @@ def refund_sale(db: Session, order: Order, *, mode: str = "full",
     order.status = "refunded"
     db.commit()
     return {"status": order.status, "amount_refunded": order.amount_refunded,
-            "return_shipping_cost": order.return_shipping_cost, "restocked": restocked}
+            "fees_refunded": order.fees_refunded,
+            "return_shipping_cost": order.return_shipping_cost,
+            "restocked": restocked, "unlinked_lines": unlinked}
 
 
 def parse_sale_date(value) -> datetime | None:

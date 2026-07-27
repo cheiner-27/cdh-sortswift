@@ -109,3 +109,119 @@ def test_pnl_nets_refund(db, card):
     assert row["refunds"] == 6.0
     assert row["cogs"] == 5.0
     assert row["profit"] == 9.0  # 20 − 6 − 5
+
+
+# --- fee refunds, shipping charged, and the cost-follows-the-card rule ---------
+
+def test_full_refund_credits_fees_back(db, card):
+    item = stock(db, card, 1, 40.0)
+    o = order_svc.create_manual_order(
+        db, buyer_name="t", marketplace_fees=13.25, shipping_cost=1.0,
+        items=[{"inventory_id": item.id, "quantity": 1, "unit_price": 100.0}])
+    order_svc.mark_shipped(db, o)
+    order_svc.refund_sale(db, o, mode="full", returned=True, return_shipping=1.0)
+    assert o.fees_refunded == 13.25            # TCGplayer hands the fee back
+    row = report_svc.realized_pnl(db, group_by="month")[0]
+    assert row["fees"] == 0.0                  # charged 13.25, credited 13.25
+    assert row["cogs"] == 0.0                  # cost follows the card
+    # only the shipping we ate is left: 1.00 out + 1.00 return
+    assert row["profit"] == -2.0
+
+
+def test_full_refund_can_keep_part_of_the_fee(db, card):
+    item = stock(db, card, 1, 40.0)
+    o = order_svc.create_manual_order(
+        db, buyer_name="t", marketplace_fees=13.25,
+        items=[{"inventory_id": item.id, "quantity": 1, "unit_price": 100.0}])
+    order_svc.mark_shipped(db, o)
+    order_svc.refund_sale(db, o, mode="full", returned=True, fees_refunded=10.00)
+    assert o.fees_refunded == 10.0
+    assert report_svc.realized_pnl(db, group_by="month")[0]["profit"] == -3.25
+
+
+def test_full_refund_returns_shipping_the_buyer_paid(db, card):
+    item = stock(db, card, 1, 5.0)
+    o = order_svc.create_manual_order(
+        db, buyer_name="t", shipping_charged=4.99,
+        items=[{"inventory_id": item.id, "quantity": 1, "unit_price": 20.0}])
+    order_svc.mark_shipped(db, o)
+    order_svc.refund_sale(db, o, mode="full", returned=True)
+    assert o.amount_refunded == 24.99          # items + the shipping they paid
+    row = report_svc.realized_pnl(db, group_by="month")[0]
+    assert row["revenue"] == 24.99 and row["refunds"] == 24.99
+    assert row["profit"] == 0.0                # a fully refunded sale is a wash
+
+
+def test_partial_refund_credits_fees_pro_rata(db, card):
+    item = stock(db, card, 3, 5.0)
+    o = order_svc.create_manual_order(
+        db, buyer_name="t", marketplace_fees=10.0,
+        items=[{"inventory_id": item.id, "quantity": 1, "unit_price": 100.0}])
+    order_svc.mark_shipped(db, o)
+    order_svc.refund_sale(db, o, mode="partial", amount=25.0)
+    assert o.fees_refunded == 2.5              # 25% refunded → 25% of the fee back
+    assert report_svc.realized_pnl(db, group_by="month")[0]["fees"] == 7.5
+
+
+def test_partial_refund_cap_includes_shipping_charged(db, card):
+    item = stock(db, card, 3, 5.0)
+    o = order_svc.create_manual_order(
+        db, buyer_name="t", shipping_charged=5.0,
+        items=[{"inventory_id": item.id, "quantity": 1, "unit_price": 20.0}])
+    order_svc.refund_sale(db, o, mode="partial", amount=24.0)  # ≤ 20 + 5
+    assert o.amount_refunded == 24.0
+
+
+def test_refund_backs_out_cogs_on_migrated_line_with_no_inventory(db, card):
+    """Migrated/historical sales carry COGS on the line with no inventory record
+    behind them. The card still came back, so its cost must not stay expensed —
+    otherwise it is double-counted when the card is re-added and re-sold."""
+    from app.models import OrderItem
+    o = order_svc.create_manual_order(db, buyer_name="t", items=[], total=171.0,
+                                      marketplace_fees=23.21, shipping_cost=5.28)
+    db.add(OrderItem(order_id=o.id, catalog_card_id=card.id, description="Eevee & Snorlax GX",
+                     quantity=1, unit_price=171.0, cogs=121.16))
+    o.deduction_applied = True
+    db.commit()
+    db.refresh(o)
+    order_svc.mark_shipped(db, o)
+
+    r = order_svc.refund_sale(db, o, mode="full", returned=True, return_shipping=5.28)
+    assert r["unlinked_lines"] == ["Eevee & Snorlax GX"]  # flagged: no auto-restock
+    assert all(li.cogs == 0.0 for li in o.items)          # cost no longer expensed here
+    row = report_svc.realized_pnl(db, group_by="month")[0]
+    assert row["cogs"] == 0.0
+    assert row["profit"] == -10.56                        # 5.28 out + 5.28 back
+
+
+def test_writeoff_keeps_cogs_on_migrated_line(db, card):
+    """The not-returned path is unchanged: an unlinked line keeps its COGS."""
+    from app.models import OrderItem
+    o = order_svc.create_manual_order(db, buyer_name="t", items=[], total=50.0)
+    db.add(OrderItem(order_id=o.id, catalog_card_id=card.id, description="Scyther",
+                     quantity=1, unit_price=50.0, cogs=31.21))
+    db.commit()
+    db.refresh(o)
+    order_svc.refund_sale(db, o, mode="full", returned=False)
+    assert sum(li.cogs for li in o.items) == 31.21
+
+
+def test_refund_then_resell_books_cogs_once(db, card):
+    """The whole point of backing the COGS out: sell → refund → resell should
+    expense the card's cost exactly once, on the sale that stuck."""
+    item = stock(db, card, 1, 40.0)
+    o1 = order_svc.create_manual_order(
+        db, buyer_name="b1", marketplace_fees=13.25,
+        items=[{"inventory_id": item.id, "quantity": 1, "unit_price": 100.0}])
+    order_svc.mark_shipped(db, o1)
+    order_svc.refund_sale(db, o1, mode="full", returned=True)
+    assert item.quantity == 1                  # restocked (line was inventory-linked)
+
+    o2 = order_svc.create_manual_order(
+        db, buyer_name="b2", marketplace_fees=14.0,
+        items=[{"inventory_id": item.id, "quantity": 1, "unit_price": 110.0}])
+    order_svc.mark_shipped(db, o2)
+    row = report_svc.realized_pnl(db, group_by="month")[0]
+    assert row["cogs"] == 40.0                 # counted once, not twice
+    assert row["fees"] == 14.0                 # first sale's fee was credited back
+    assert row["profit"] == 56.0               # 210 − 100 refunded − 40 − 14
