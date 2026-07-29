@@ -6,7 +6,7 @@ only used for sale deductions (and their reversals).
 """
 from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from ..models import (
@@ -371,12 +371,31 @@ def _as_utc(dt: datetime) -> datetime:
     return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
 
 
-def _pool_key(row) -> tuple:
+def pool_key(row) -> tuple:
     """The FIFO pool an item (or acquisition batch) belongs to.
 
     Language and bin are deliberately NOT part of the key — see rekey_cost_basis.
     """
     return (row.catalog_card_id, row.custom_sku_id, row.condition, row.printing)
+
+
+_pool_key = pool_key  # internal alias, kept for readability at call sites below
+
+
+def lot_pool_keys(db: Session, date: str, unit_cost: float | None = None) -> set[tuple]:
+    """FIFO pools touched by one purchase: every batch acquired on ``date``
+    (``YYYY-MM-DD``), optionally narrowed to a single cost tier.
+
+    The Purchases screen drills into inventory through these rather than through
+    a cost match. A card from this purchase that you *also* owned from an earlier
+    buy reports the older batch's cost, so a cost filter would drop it — but its
+    pool is still part of this purchase and belongs in the drill-through.
+    """
+    q = select(AcquisitionLog).where(
+        func.date(AcquisitionLog.acquired_at) == date)
+    if unit_cost is not None:
+        q = q.where(AcquisitionLog.unit_cost == unit_cost)
+    return {pool_key(b) for b in db.execute(q).scalars()}
 
 
 def fifo_rollup(db: Session, items: list[InventoryItem]) -> dict[int, dict]:

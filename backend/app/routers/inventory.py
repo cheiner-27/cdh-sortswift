@@ -47,6 +47,13 @@ def filter_items(db: Session, params: dict) -> list[InventoryItem]:
     items = db.execute(q.order_by(InventoryItem.id.desc())).scalars().all()
 
     # Post-filters that need computed values
+    # {"date": "YYYY-MM-DD", "unit_cost": 7.643} — every row in a purchase's FIFO
+    # pools. Cost-matching gets close but misses cards you also owned from an
+    # earlier buy, which report that older batch's cost; the pool doesn't.
+    if params.get("lot"):
+        lot = params["lot"]
+        keys = inv_svc.lot_pool_keys(db, lot["date"], lot.get("unit_cost"))
+        items = [i for i in items if inv_svc.pool_key(i) in keys]
     if params.get("listing_status") and params.get("marketplace"):
         mk, st = params["marketplace"], params["listing_status"]
         items = [i for i in items

@@ -1,4 +1,5 @@
 import React, { useEffect, useState } from 'react'
+import { useSearchParams } from 'react-router-dom'
 import { api, fmtMoney, scanImageUrl } from '../api.js'
 import { Field, Modal, Msg, SortTh, useMeta, useMsg, useSort } from '../components.jsx'
 
@@ -7,7 +8,7 @@ const EMPTY_FILTER = {
   comment: '', in_stock_only: true, include_deleted: false,
   price_min: '', price_max: '', cost_min: '', cost_max: '',
   age_min_days: '', age_max_days: '',
-  marketplace: '', listing_status: '',
+  marketplace: '', listing_status: '', lot: null,
 }
 const NUMERIC_FILTERS = ['price_min', 'price_max', 'cost_min', 'cost_max',
   'age_min_days', 'age_max_days']
@@ -16,6 +17,7 @@ const PAGE_SIZE = 500
 export default function InventoryPage() {
   const meta = useMeta()
   const [msg, ok, err] = useMsg()
+  const [sp, setSp] = useSearchParams()
   const [filter, setFilter] = useState(EMPTY_FILTER)
   const [data, setData] = useState({ total: 0, totals: null, items: [] })
   const { sorted, sort, toggle: sortBy } = useSort(data.items)
@@ -24,18 +26,19 @@ export default function InventoryPage() {
   const [modal, setModal] = useState(null) // 'bulk' | 'adjust' | 'transfer' | 'split' | 'labels'
   const [labels, setLabels] = useState(null)
 
-  const cleanFilter = () => {
-    const f = { ...filter, with_age: true }
+  const cleanFilter = (f0 = filter) => {
+    const f = { ...f0, with_age: true }
     for (const k of NUMERIC_FILTERS)
       f[k] = f[k] === '' ? undefined : Number(f[k])
-    for (const k of Object.keys(f)) if (f[k] === '' || f[k] === undefined) delete f[k]
+    for (const k of Object.keys(f))
+      if (f[k] === '' || f[k] === undefined || f[k] === null) delete f[k]
     return f
   }
 
-  const search = async () => {
+  const search = async (f0 = filter) => {
     try {
       setData(await api.post('/api/inventory/search',
-        { ...cleanFilter(), limit: PAGE_SIZE, offset: 0 }))
+        { ...cleanFilter(f0), limit: PAGE_SIZE, offset: 0 }))
       setSelected(new Set())
     } catch (e) { err(e) }
   }
@@ -49,7 +52,19 @@ export default function InventoryPage() {
       setData((d) => ({ ...next, items: [...d.items, ...next.items] }))
     } catch (e) { err(e) }
   }
-  useEffect(() => { search() }, [])
+  // ?lot_date=&lot_cost= arrives from the Purchases screen: show that whole
+  // purchase, sold-out rows and all, rather than the default in-stock view.
+  useEffect(() => {
+    const date = sp.get('lot_date')
+    if (!date) { search(); return }
+    const cost = sp.get('lot_cost')
+    const f = {
+      ...EMPTY_FILTER, in_stock_only: false,
+      lot: { date, unit_cost: cost === null ? null : Number(cost) },
+    }
+    setFilter(f)
+    search(f)
+  }, [])
 
   const toggle = (id) => setSelected((s) => {
     const n = new Set(s); n.has(id) ? n.delete(id) : n.add(id); return n
@@ -143,11 +158,23 @@ export default function InventoryPage() {
             <option value="">—</option><option>unlisted</option><option>listed</option><option>sold</option><option>error</option></select></Field>
         </div>
         <div className="row center">
+          {filter.lot && (
+            <span className="badge yellow"
+              title="Every row in this purchase's FIFO pools — a superset of a cost match">
+              purchase {filter.lot.date}
+              {filter.lot.unit_cost !== null && ` @ $${filter.lot.unit_cost}`}
+              {' '}<a href="#" onClick={(e) => {
+                e.preventDefault()
+                const f = { ...filter, lot: null }
+                setFilter(f); setSp({}); search(f)
+              }}>×</a>
+            </span>
+          )}
           <label><input type="checkbox" checked={filter.in_stock_only}
             onChange={(e) => setFilter({ ...filter, in_stock_only: e.target.checked })} /> in stock only</label>
           <label><input type="checkbox" checked={filter.include_deleted}
             onChange={(e) => setFilter({ ...filter, include_deleted: e.target.checked })} /> show deleted</label>
-          <button className="primary" onClick={search}>Search</button>
+          <button className="primary" onClick={() => search()}>Search</button>
           <span className="muted">
             {data.items.length < data.total
               ? `${data.items.length} of ${data.total} record(s)`

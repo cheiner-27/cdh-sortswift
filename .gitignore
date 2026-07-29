@@ -217,6 +217,11 @@ __marimo__/
 # Streamlit
 .streamlit/secrets.toml
 
+# SortSwift data
+#   Pre-migration snapshots of sortswift.db. The live DB is tracked (LFS) so it
+#   syncs across machines; these are 100MB+ local safety copies and must not be.
+backend/data/*.bak
+
 # Node / frontend
 node_modules/
 npm-debug.log*

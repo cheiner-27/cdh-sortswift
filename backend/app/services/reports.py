@@ -6,7 +6,9 @@ from datetime import datetime, timezone
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from ..models import AcquisitionLog, CatalogCard, InventoryItem, Order, PriceData
+from ..models import (
+    AcquisitionLog, CatalogCard, FifoConsumption, InventoryItem, Order, PriceData,
+)
 from . import inventory as inv_svc
 
 AGE_BUCKETS = [(0, 30), (31, 60), (61, 90), (91, None)]
@@ -159,3 +161,70 @@ def location_summary(db: Session) -> list[dict]:
         b["value"] += (item.current_price or 0.0) * item.quantity
     return [{"bin": k, "records": v["records"], "units": v["units"],
              "value": round(v["value"], 2)} for k, v in sorted(bins.items())]
+
+
+def purchase_lots(db: Session) -> list[dict]:
+    """Purchases reconstructed from the FIFO acquisition batches.
+
+    There is no first-class Purchase record, but the batches carry everything a
+    purchase is: an acquisition date, a per-unit cost, and the units bought. One
+    intake writes all its batches at the same timestamp, so ``(date, unit_cost)``
+    is the purchase — or one cost tier of it, where a lot was priced in bands.
+
+    This is the reconciliation the Inventory screen structurally cannot do: its
+    money is quantity-weighted, so a card that has sold contributes nothing,
+    while ``units``/``paid`` here are what you *bought* and stay put as stock
+    sells through. Compare ``paid`` against the invoice to confirm the whole
+    purchase made it in.
+
+    ``sold`` counts units consumed by sales; ``other_out`` is anything else that
+    drew a batch down (supplier returns, an undone import), so
+    ``units == left + sold + other_out`` always holds.
+
+    ``ask`` is the asking value of on-hand stock in the pools this purchase
+    touched, matching what the Inventory drill-through will total. Where a pool
+    mixes purchases, that covers the pool's whole on-hand stock, not just this
+    purchase's share.
+    """
+    batches = db.execute(select(AcquisitionLog)).scalars().all()
+    consumed: dict[int, int] = defaultdict(int)
+    for row in db.execute(select(FifoConsumption)).scalars():
+        consumed[row.acquisition_id] += row.quantity
+
+    rows_by_pool: dict[tuple, list[InventoryItem]] = defaultdict(list)
+    for item in db.execute(select(InventoryItem).where(
+            InventoryItem.deleted == False)).scalars():  # noqa: E712
+        rows_by_pool[inv_svc.pool_key(item)].append(item)
+
+    lots: dict[tuple, dict] = {}
+    for b in batches:
+        key = (b.acquired_at.date().isoformat(), b.unit_cost)
+        lot = lots.setdefault(key, {
+            "date": key[0], "unit_cost": b.unit_cost, "batches": 0, "units": 0,
+            "paid": 0.0, "left": 0, "sold": 0, "cards": set(), "pools": set(),
+        })
+        lot["batches"] += 1
+        lot["units"] += b.quantity
+        lot["paid"] += b.quantity * b.unit_cost
+        lot["left"] += b.quantity_remaining
+        lot["sold"] += consumed.get(b.id, 0)
+        lot["cards"].add((b.catalog_card_id, b.custom_sku_id))
+        lot["pools"].add(inv_svc.pool_key(b))
+
+    out = []
+    for lot in lots.values():
+        on_hand = [i for pool in lot["pools"] for i in rows_by_pool.get(pool, [])]
+        out.append({
+            "date": lot["date"], "unit_cost": lot["unit_cost"],
+            "cards": len(lot["cards"]), "batches": lot["batches"],
+            "units": lot["units"], "paid": round(lot["paid"], 2),
+            "sold": lot["sold"], "left": lot["left"],
+            "other_out": lot["units"] - lot["left"] - lot["sold"],
+            "rows": len(on_hand),
+            "units_on_hand": sum(i.quantity for i in on_hand),
+            "ask": round(sum(((i.price_override if i.price_override is not None
+                               else i.current_price) or 0.0) * i.quantity
+                             for i in on_hand), 2),
+        })
+    out.sort(key=lambda l: (l["date"], l["paid"]), reverse=True)
+    return out

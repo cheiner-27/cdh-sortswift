@@ -13,7 +13,7 @@ from .db import Base, SessionLocal, engine, ensure_schema
 from . import models  # noqa: F401  (register models with Base)
 from .routers import (
     bulk, catalog, custom_items, expenses, exports, imports, inventory, lots,
-    marketplaces, misc, orders, pricing, scans, staging,
+    marketplaces, misc, orders, pricing, purchases, scans, staging,
 )
 
 logging.basicConfig(level=logging.INFO)
@@ -69,7 +69,7 @@ app.add_middleware(
 )
 
 for r in (misc, catalog, scans, staging, inventory, imports, exports, pricing,
-          marketplaces, lots, orders, custom_items, expenses, bulk):
+          marketplaces, lots, orders, custom_items, expenses, purchases, bulk):
     app.include_router(r.router)
 
 # Serve the built frontend if present (npm run build in frontend/)

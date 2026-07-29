@@ -17,6 +17,7 @@ import CatalogPage from './pages/CatalogPage.jsx'
 import SettingsPage from './pages/SettingsPage.jsx'
 import CycleCountPage from './pages/CycleCountPage.jsx'
 import ExpensesPage from './pages/ExpensesPage.jsx'
+import PurchasesPage from './pages/PurchasesPage.jsx'
 import HelpPage from './pages/HelpPage.jsx'
 
 const nav = [
@@ -37,6 +38,7 @@ const nav = [
   { to: '/orders', label: 'Orders' },
   { section: 'Data' },
   { to: '/reports', label: 'Reports' },
+  { to: '/purchases', label: 'Purchases' },
   { to: '/expenses', label: 'Expenses' },
   { to: '/catalog', label: 'Catalog' },
   { to: '/settings', label: 'Settings' },
@@ -71,6 +73,7 @@ export default function App() {
           <Route path="/lots" element={<LotsPage />} />
           <Route path="/orders" element={<OrdersPage />} />
           <Route path="/reports" element={<ReportsPage />} />
+          <Route path="/purchases" element={<PurchasesPage />} />
           <Route path="/expenses" element={<ExpensesPage />} />
           <Route path="/catalog" element={<CatalogPage />} />
           <Route path="/settings" element={<SettingsPage />} />
