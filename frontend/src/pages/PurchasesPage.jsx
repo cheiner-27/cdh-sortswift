@@ -10,8 +10,9 @@ const fmtPct = (v) => (v === null || v === undefined ? '—' : `${v > 0 ? '+' : 
 export default function PurchasesPage() {
   const [msg, , err] = useMsg()
   const [data, setData] = useState({ lots: [], totals: null, fee_rate: 0 })
-  // Asking prices are gross; the marketplace takes its cut when they sell.
-  const [netOfFees, setNetOfFees] = useState(true)
+  // Off by default: gross asking prices are what Inventory shows, and silently
+  // discounting them here made the same stock look like two different numbers.
+  const [netOfFees, setNetOfFees] = useState(false)
   const { sorted, sort, toggle } = useSort(data.lots)
   const navigate = useNavigate()
 
@@ -58,7 +59,7 @@ export default function PurchasesPage() {
             <div className="label">Revenue so far</div></div>
           <div className="stat" title="What the unsold remainder is priced at">
             <div className="value">{fmtMoney(totalAsk)}</div>
-            <div className="label">Unsold at ask · {t.left} units</div></div>
+            <div className="label">Unsold at ask{netOfFees ? ', net of fees' : ''} · {t.left} units</div></div>
           <div className="stat" title="revenue + unsold at ask − paid">
             <div className="value" style={{ color: totalProjected < 0 ? 'var(--red)' : undefined }}>
               {fmtMoney(totalProjected)}</div>
@@ -68,10 +69,10 @@ export default function PurchasesPage() {
       )}
 
       <div className="row center">
-        <label title="Discount asking prices by your realised fee rate — revenue is already net">
+        <label title="Off, asking prices are gross and match the Inventory listed total. On, they are discounted by the fee rate your own orders have realised — revenue is already net either way.">
           <input type="checkbox" checked={netOfFees}
             onChange={(e) => setNetOfFees(e.target.checked)} />
-          {' '}asking net of fees ({(data.fee_rate * 100).toFixed(1)}% — your realised rate)
+          {' '}discount asking by fees ({(data.fee_rate * 100).toFixed(1)}% — your realised rate)
         </label>
       </div>
 
@@ -85,7 +86,9 @@ export default function PurchasesPage() {
           <SortTh k="sold" accessor={(l) => l.sold} sort={sort} toggle={toggle}>Sold</SortTh>
           <SortTh k="revenue" accessor={(l) => l.revenue} sort={sort} toggle={toggle}>Revenue</SortTh>
           <SortTh k="left" accessor={(l) => l.left} sort={sort} toggle={toggle}>Left</SortTh>
-          <SortTh k="ask" accessor={(l) => l.ask} sort={sort} toggle={toggle}>Unsold at ask</SortTh>
+          <SortTh k="ask" accessor={(l) => l.ask} sort={sort} toggle={toggle}
+            title="Gross asking price of the unsold units, matching the Inventory listed total">
+            Unsold at ask{netOfFees ? ' (net)' : ''}</SortTh>
           {/* Sort on the gross figures: useSort caches the accessor, so keying
               off the fee toggle would leave the order stale when it flips. */}
           <SortTh k="projected" accessor={(l) => l.projected} sort={sort} toggle={toggle}>Projected</SortTh>
