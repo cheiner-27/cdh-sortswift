@@ -219,6 +219,60 @@ def reduce_cost_basis(db: Session, item: InventoryItem, refund_amount: float,
             "unapplied": round(max(0.0, remaining), 2)}
 
 
+def purge_deleted(db: Session, preview: bool = False) -> dict:
+    """Empty the trash: permanently remove soft-deleted rows and their cost basis.
+
+    Soft delete only flips a flag — the row keeps its quantity and its FIFO
+    batches — so deleted stock still reads as unsold in any batch-level roll-up
+    (it inflated "units unsold" on Purchases by 4,103 units before this existed).
+
+    A batch is dropped only when its pool has no live rows left AND nothing has
+    ever consumed it; otherwise removing it would strip cost basis off a live row
+    or orphan a sale's FIFO link, so it stays and is reported in ``batches_kept``.
+    Audit entries are detached rather than deleted — each carries its own item
+    description, so the trail outlives the row it described.
+    """
+    items = db.execute(select(InventoryItem).where(
+        InventoryItem.deleted == True)).scalars().all()  # noqa: E712
+    live_pools = {pool_key(i) for i in db.execute(select(InventoryItem).where(
+        InventoryItem.deleted == False)).scalars()}  # noqa: E712
+    consumed = {c.acquisition_id for c in db.execute(select(FifoConsumption)).scalars()}
+
+    purged_pools = {pool_key(i) for i in items}
+    dead_pools = purged_pools - live_pools
+    pool_batches = [b for b in db.execute(select(AcquisitionLog)).scalars()
+                    if pool_key(b) in purged_pools]
+    droppable = [b for b in pool_batches
+                 if pool_key(b) in dead_pools and b.id not in consumed]
+    ids = [i.id for i in items]
+    logs = db.execute(select(InventoryLog).where(
+        InventoryLog.inventory_id.in_(ids))).scalars().all() if ids else []
+
+    summary = {
+        "items": len(items), "item_ids": ids,
+        "units": sum(i.quantity for i in items),
+        "listings": sum(len(i.listings) for i in items),
+        "log_entries_detached": len(logs),
+        "batches": len(droppable),
+        "batch_units_remaining": sum(b.quantity_remaining for b in droppable),
+        "batches_kept": len(pool_batches) - len(droppable),
+        "preview": preview,
+    }
+    if preview:
+        return summary
+
+    for log in logs:
+        log.inventory_id = None
+    for batch in droppable:
+        db.delete(batch)
+    for item in items:
+        for listing in item.listings:
+            db.delete(listing)
+        db.delete(item)
+    db.commit()
+    return summary
+
+
 def split_cost_basis(db: Session, source: InventoryItem, target: InventoryItem,
                      quantity: int) -> float:
     """Move `quantity` units of cost basis from `source` to `target`, oldest

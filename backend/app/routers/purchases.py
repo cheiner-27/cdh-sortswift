@@ -15,13 +15,20 @@ router = APIRouter(prefix="/api/purchases", tags=["purchases"])
 @router.get("/lots")
 def lots(db: Session = Depends(get_db)):
     rows = report_svc.purchase_lots(db)
+    paid = sum(l["paid"] for l in rows)
+    revenue = sum(l["revenue"] for l in rows)
+    ask = sum(l["ask"] for l in rows)
     return {
         "lots": rows,
+        "fee_rate": report_svc.fee_rate(db),
         "totals": {
             "purchases": len(rows),
             "units": sum(l["units"] for l in rows),
-            "paid": round(sum(l["paid"] for l in rows), 2),
+            "paid": round(paid, 2),
             "left": sum(l["left"] for l in rows),
-            "ask": round(sum(l["ask"] for l in rows), 2),
+            "ask": round(ask, 2),
+            "unpriced_units": sum(l["unpriced_units"] for l in rows),
+            "revenue": round(revenue, 2),
+            "projected": round(revenue + ask - paid, 2),
         },
     }

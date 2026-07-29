@@ -441,6 +441,13 @@ def restore(item_id: int, db: Session = Depends(get_db)):
     return {"ok": True}
 
 
+@router.post("/purge-deleted")
+def purge_deleted(payload: dict = Body(default={}), db: Session = Depends(get_db)):
+    """Permanently remove every soft-deleted row and its cost basis.
+    Irreversible; pass preview=true to see what would go."""
+    return inv_svc.purge_deleted(db, preview=payload.get("preview", False))
+
+
 @router.delete("/{item_id}")
 def hard_delete(item_id: int, db: Session = Depends(get_db)):
     item = db.get(InventoryItem, item_id)
