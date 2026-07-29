@@ -61,18 +61,22 @@ def filter_items(db: Session, params: dict) -> list[InventoryItem]:
     if any(params.get(k) is not None
            for k in ("cost_min", "cost_max", "age_min_days", "age_max_days")):
         rollup = inv_svc.fifo_rollup(db, items)
+        # Unknown cost / unknown age satisfy neither bound. Reading a missing
+        # cost as $0 (which is what the old `or 0.0` did) made "Cost ≤ x" match
+        # every sold-out row and "Cost ≥ x" match none of them; sold-out rows now
+        # carry their last purchase cost via fifo_rollup, so only rows with no
+        # acquisition history at all fall out here.
         if params.get("cost_min") is not None:
-            items = [i for i in items
-                     if (rollup[i.id]["unit_cost"] or 0.0) >= params["cost_min"]]
+            items = [i for i in items if rollup[i.id]["unit_cost"] is not None
+                     and rollup[i.id]["unit_cost"] >= params["cost_min"]]
         if params.get("cost_max") is not None:
-            items = [i for i in items
-                     if (rollup[i.id]["unit_cost"] or 0.0) <= params["cost_max"]]
-        # A row with no acquisition history has no age, so it satisfies neither
-        # bound (matching how age_min_days has always treated unknown age).
+            items = [i for i in items if rollup[i.id]["unit_cost"] is not None
+                     and rollup[i.id]["unit_cost"] <= params["cost_max"]]
+        # Age has no sold-out fallback by design — nothing on hand, no age — so
+        # an age filter still excludes every out-of-stock row.
         if params.get("age_min_days") is not None:
-            items = [i for i in items
-                     if (rollup[i.id]["age_days"] if rollup[i.id]["age_days"] is not None
-                         else -1) >= params["age_min_days"]]
+            items = [i for i in items if rollup[i.id]["age_days"] is not None
+                     and rollup[i.id]["age_days"] >= params["age_min_days"]]
         if params.get("age_max_days") is not None:
             items = [i for i in items if rollup[i.id]["age_days"] is not None
                      and rollup[i.id]["age_days"] <= params["age_max_days"]]
@@ -130,8 +134,10 @@ def detail(item_id: int, db: Session = Depends(get_db)):
     history = db.execute(select(InventoryLog).where(
         InventoryLog.inventory_id == item_id
     ).order_by(InventoryLog.id.desc())).scalars().all()
-    d = inventory_dict(item, age_days=inv_svc.inventory_age_days(db, item),
-                       fifo_cost=inv_svc.fifo_unit_cost(db, item))
+    # Same roll-up the list rows use, so a sold-out row's cost doesn't read as
+    # blank here while the list shows its last purchase price.
+    roll = inv_svc.fifo_rollup(db, [item])[item.id]
+    d = inventory_dict(item, age_days=roll["age_days"], fifo_cost=roll["unit_cost"])
     # FIFO acquisition lots for this identity (card/sku + condition + printing),
     # each with its own acquisition date and cost — oldest first (consumed first).
     lots = db.execute(select(AcquisitionLog).where(

@@ -63,8 +63,41 @@ def test_cost_and_age_range_filters(db, card):
 
     assert ids() == {cheap_old.id, pricey_new.id, no_history.id}
     assert ids(cost_min=1.0) == {pricey_new.id}
-    assert ids(cost_max=1.0) == {cheap_old.id, no_history.id}  # no cost basis reads as $0
+    assert ids(cost_max=1.0) == {cheap_old.id}  # unknown cost matches neither bound
     assert ids(cost_min=0.25, cost_max=8.00) == {cheap_old.id, pricey_new.id}
     assert ids(age_max_days=30) == {pricey_new.id}   # unknown age matches neither bound
     assert ids(age_min_days=30) == {cheap_old.id}
     assert ids(age_min_days=1, age_max_days=300) == {cheap_old.id, pricey_new.id}
+
+
+def test_cost_filter_reaches_sold_out_rows(db, card):
+    """A row that has sold through keeps its last purchase cost, so the Cost
+    filters still work on it — the age filters deliberately do not."""
+    now = datetime.now(timezone.utc)
+    sold_out = inv.find_or_create_item(db, catalog_card_id=card.id, condition="NM")
+    inv.add_stock(db, sold_out, 2, 0.30, acquired_at=now - timedelta(days=90))
+    inv.add_stock(db, sold_out, 2, 4.00, acquired_at=now - timedelta(days=10))
+    on_hand = inv.find_or_create_item(db, catalog_card_id=card.id, condition="LP")
+    inv.add_stock(db, on_hand, 1, 2.00, acquired_at=now - timedelta(days=5))
+    db.commit()
+
+    # Drain the whole pool: both batches exhausted, quantity back to 0.
+    inv.consume_fifo(db, sold_out, 4)
+    inv.apply_delta(db, sold_out, -4)
+    db.commit()
+    assert sold_out.quantity == 0
+    assert inv.fifo_unit_cost(db, sold_out) is None  # pricing/COGS still see nothing
+
+    roll = inv.fifo_rollup(db, [sold_out])[sold_out.id]
+    assert roll["unit_cost"] == 4.00   # newest spent batch — what we last paid
+    assert roll["age_days"] is None    # no age once nothing is on hand
+    assert roll["cost_basis"] == 0.0   # nothing on hand to value
+
+    def ids(**params):
+        return {i.id for i in inventory_router.filter_items(
+            db, {"in_stock_only": False, **params})}
+
+    assert ids(cost_min=3.00) == {sold_out.id}
+    assert ids(cost_max=1.00) == set()          # was: matched every sold-out row
+    assert ids(cost_min=1.00, cost_max=5.00) == {sold_out.id, on_hand.id}
+    assert ids(age_max_days=3650) == {on_hand.id}

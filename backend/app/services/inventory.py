@@ -387,6 +387,14 @@ def fifo_rollup(db: Session, items: list[InventoryItem]) -> dict[int, dict]:
     item — the batched form exists because those are a query each, which does
     not scale to "value my whole inventory".
 
+    One deliberate difference: when a pool is fully drawn down (a sold-out row),
+    ``unit_cost`` falls back to the NEWEST spent batch — "what I last paid" —
+    so the Inventory screen's cost column and Cost ≥/≤ filters still say
+    something about stock that has sold through. fifo_unit_cost() keeps
+    returning None there, because its callers (price floors, COGS) must not
+    price off units that no longer exist. ``age_days`` gets no such fallback:
+    "days since acquisition" is meaningless once nothing is on hand.
+
     ``cost_basis`` is the remaining cost of *this item's* on-hand units: walk
     the pool oldest-first and take ``quantity`` units. Allocation is shared
     across the items handed in, because a pool spans bins and languages — two
@@ -395,13 +403,20 @@ def fifo_rollup(db: Session, items: list[InventoryItem]) -> dict[int, dict]:
     """
     keys = {_pool_key(it) for it in items}
     pools: dict[tuple, list[AcquisitionLog]] = {}
+    last_spent: dict[tuple, AcquisitionLog] = {}  # newest exhausted batch per pool
     if keys:
-        batches = db.execute(select(AcquisitionLog).where(
-            AcquisitionLog.quantity_remaining > 0)).scalars().all()
+        batches = db.execute(select(AcquisitionLog)).scalars().all()
         for batch in batches:
             key = _pool_key(batch)
-            if key in keys:
+            if key not in keys:
+                continue
+            if batch.quantity_remaining > 0:
                 pools.setdefault(key, []).append(batch)
+                continue
+            prev = last_spent.get(key)
+            if prev is None or ((_as_utc(batch.acquired_at), batch.id)
+                                > (_as_utc(prev.acquired_at), prev.id)):
+                last_spent[key] = batch
         for pool in pools.values():
             pool.sort(key=lambda b: (_as_utc(b.acquired_at), b.id))
 
@@ -409,8 +424,10 @@ def fifo_rollup(db: Session, items: list[InventoryItem]) -> dict[int, dict]:
     claimed: dict[int, int] = {}  # batch id -> units already assigned to an item
     out: dict[int, dict] = {}
     for item in sorted(items, key=lambda i: i.id):  # stable allocation order
-        pool = pools.get(_pool_key(item), [])
+        key = _pool_key(item)
+        pool = pools.get(key, [])
         oldest = pool[0] if pool else None
+        priced_at = oldest or last_spent.get(key)
         needed = max(0, item.quantity)
         cost_basis = 0.0
         for batch in pool:
@@ -423,7 +440,7 @@ def fifo_rollup(db: Session, items: list[InventoryItem]) -> dict[int, dict]:
             needed -= take
             cost_basis += take * batch.unit_cost
         out[item.id] = {
-            "unit_cost": oldest.unit_cost if oldest else None,
+            "unit_cost": priced_at.unit_cost if priced_at else None,
             "age_days": (max(0, (now - _as_utc(oldest.acquired_at)).days)
                          if oldest else None),
             "cost_basis": round(cost_basis, 2),

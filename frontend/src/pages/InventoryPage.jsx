@@ -11,6 +11,7 @@ const EMPTY_FILTER = {
 }
 const NUMERIC_FILTERS = ['price_min', 'price_max', 'cost_min', 'cost_max',
   'age_min_days', 'age_max_days']
+const PAGE_SIZE = 500
 
 export default function InventoryPage() {
   const meta = useMeta()
@@ -33,8 +34,19 @@ export default function InventoryPage() {
 
   const search = async () => {
     try {
-      setData(await api.post('/api/inventory/search', cleanFilter()))
+      setData(await api.post('/api/inventory/search',
+        { ...cleanFilter(), limit: PAGE_SIZE, offset: 0 }))
       setSelected(new Set())
+    } catch (e) { err(e) }
+  }
+  // The result set is ordered by id, so the next slice starts where the loaded
+  // rows end. Without this the table silently stopped at the server's default
+  // page while the record count reported the full match.
+  const loadMore = async () => {
+    try {
+      const next = await api.post('/api/inventory/search',
+        { ...cleanFilter(), limit: PAGE_SIZE, offset: data.items.length })
+      setData((d) => ({ ...next, items: [...d.items, ...next.items] }))
     } catch (e) { err(e) }
   }
   useEffect(() => { search() }, [])
@@ -115,15 +127,15 @@ export default function InventoryPage() {
           <Field label="Price ≤"><input style={{ width: 60 }} value={filter.price_max}
             onChange={(e) => setFilter({ ...filter, price_max: e.target.value })} /></Field>
           <Field label="Cost ≥"><input style={{ width: 60 }} value={filter.cost_min}
-            title="FIFO unit cost — what you paid for the oldest unit on hand"
+            title="FIFO unit cost — what you paid for the oldest unit on hand, or for the last unit bought if the row has sold out"
             onChange={(e) => setFilter({ ...filter, cost_min: e.target.value })} /></Field>
           <Field label="Cost ≤"><input style={{ width: 60 }} value={filter.cost_max}
-            title="FIFO unit cost — what you paid for the oldest unit on hand"
+            title="FIFO unit cost — what you paid for the oldest unit on hand, or for the last unit bought if the row has sold out"
             onChange={(e) => setFilter({ ...filter, cost_max: e.target.value })} /></Field>
           <Field label="Age ≥ days"><input style={{ width: 60 }} value={filter.age_min_days}
             onChange={(e) => setFilter({ ...filter, age_min_days: e.target.value })} /></Field>
           <Field label="Age ≤ days"><input style={{ width: 60 }} value={filter.age_max_days}
-            title="Days since the oldest unit was acquired. Rows with no acquisition history have no age and match neither age filter."
+            title="Days since the oldest unit on hand was acquired. Sold-out rows, and rows with no acquisition history, have no age and match neither age filter."
             onChange={(e) => setFilter({ ...filter, age_max_days: e.target.value })} /></Field>
           <Field label="Marketplace"><select value={filter.marketplace} onChange={(e) => setFilter({ ...filter, marketplace: e.target.value })}>
             <option value="">—</option>{meta.marketplaces.map((m) => <option key={m}>{m}</option>)}</select></Field>
@@ -136,7 +148,10 @@ export default function InventoryPage() {
           <label><input type="checkbox" checked={filter.include_deleted}
             onChange={(e) => setFilter({ ...filter, include_deleted: e.target.checked })} /> show deleted</label>
           <button className="primary" onClick={search}>Search</button>
-          <span className="muted">{data.total} record(s)</span>
+          <span className="muted">
+            {data.items.length < data.total
+              ? `${data.items.length} of ${data.total} record(s)`
+              : `${data.total} record(s)`}</span>
           <span style={{ flex: 1 }} />
           <button disabled={!selected.size} onClick={() => setModal('bulk')}>Bulk edit</button>
           <button disabled={!selected.size} onClick={() => setModal('adjust')}>Adjust stock</button>
@@ -231,7 +246,14 @@ export default function InventoryPage() {
             </td>
           </tr>))}
         </tbody>
-      </table></div>
+      </table>
+      {data.items.length < data.total && (
+        <div className="row center">
+          <button onClick={loadMore}>
+            Load more ({data.total - data.items.length} more)</button>
+          <span className="muted">Sorting applies to the rows loaded so far.</span>
+        </div>
+      )}</div>
 
       {detail && <DetailModal meta={meta} item={detail} onClose={() => { setDetail(null); search() }}
         onSplit={() => { setModal('split') }} onMsg={{ ok, err }} />}
