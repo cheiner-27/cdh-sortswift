@@ -20,9 +20,13 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from ..db import get_db
+from ..domain import bulk_grades_for
 from ..models import AcquisitionLog, CustomProduct, CustomSku, InventoryItem
 from ..services import inventory as inv_svc
 from ..services import orders as order_svc
+from ..services import pricing
+from ..services.settings import get_setting
+from ..validate import mapping, money, whole
 
 router = APIRouter(prefix="/api/bulk", tags=["bulk"])
 
@@ -44,11 +48,14 @@ def _pile_item(db: Session, sku: CustomSku, *,
     return db.execute(q).scalars().first()
 
 
-def pile_dict(db: Session, product: CustomProduct) -> dict:
+def pile_dict(db: Session, product: CustomProduct, *, rates: dict | None = None) -> dict:
     sku = _pile_sku(product)
     item = _pile_item(db, sku) if sku else None
     cost_basis = 0.0
     next_unit_cost = None
+    if rates is None:
+        rates = get_setting(db, "bulk_rates") or {}
+    unit_value = pricing.bulk_unit_value(rates, product.category, product.composition)
     if sku is not None:
         batches = db.execute(select(AcquisitionLog).where(
             AcquisitionLog.custom_sku_id == sku.id,
@@ -71,6 +78,13 @@ def pile_dict(db: Session, product: CustomProduct) -> dict:
                           if item and item.quantity else None),
         "next_unit_cost": round(next_unit_cost, 4) if next_unit_cost is not None else None,
         "current_price": item.current_price if item else None,
+        # Grade mix and what it makes the pile worth. unit_value is None until
+        # a mix is set, which the UI shows as "set mix" rather than $0.00.
+        "composition": product.composition or {},
+        "grades": [{"key": k, "label": lbl} for k, lbl, _ in bulk_grades_for(product.category)],
+        "unit_value": unit_value,
+        "market_value": (round(unit_value * item.quantity, 2)
+                         if unit_value is not None and item else None),
     }
 
 
@@ -78,14 +92,46 @@ def pile_dict(db: Session, product: CustomProduct) -> dict:
 def list_piles(db: Session = Depends(get_db)):
     products = db.execute(select(CustomProduct).where(
         CustomProduct.item_type == "bulk").order_by(CustomProduct.name)).scalars().all()
+    rates = get_setting(db, "bulk_rates") or {}  # read once for the whole list
     out = []
     for p in products:
         sku = _pile_sku(p)
         item = _pile_item(db, sku, include_deleted=True) if sku else None
         if item is not None and item.deleted:
             continue  # soft-deleted pile — hidden
-        out.append(pile_dict(db, p))
+        out.append(pile_dict(db, p, rates=rates))
     return out
+
+
+@router.patch("/piles/{product_id}")
+def update_pile(product_id: int, payload: dict = Body(...),
+                db: Session = Depends(get_db)):
+    """Set a pile's grade mix (and its editable descriptive fields).
+
+    ``composition`` is percentages keyed by the game's bulk grades. They may
+    total less than 100 — the remainder is simply valued at nothing — but not
+    more, which is always a typo rather than a pile that is 130% of itself.
+    """
+    product = db.get(CustomProduct, product_id)
+    if not product or product.item_type != "bulk":
+        raise HTTPException(404, "not a bulk pile")
+    for f in ("name", "group", "description"):
+        if f in payload:
+            setattr(product, f, payload[f])
+    if "composition" in payload:
+        raw = mapping(payload["composition"], "composition")
+        valid = {k for k, _label, _rate in bulk_grades_for(product.category)}
+        clean = {}
+        for key, pct in raw.items():
+            if key not in valid:
+                raise HTTPException(400, f"unknown grade '{key}' for {product.category}")
+            clean[key] = money(pct, f"composition.{key}", max_value=100.0)
+        total = sum(clean.values())
+        if total > 100.0:
+            raise HTTPException(400, f"mix totals {total:g}% — cannot exceed 100%")
+        product.composition = clean
+    db.commit()
+    return pile_dict(db, product)
 
 
 @router.delete("/piles/{product_id}")
@@ -142,12 +188,11 @@ def record_purchase(product_id: int, payload: dict = Body(...),
     sku = _pile_sku(product)
     if sku is None:
         raise HTTPException(400, "pile has no sku")
-    qty = int(payload.get("quantity", 0))
-    if qty <= 0:
-        raise HTTPException(400, "quantity must be > 0")
-    unit_cost = payload.get("unit_cost")
-    if unit_cost is None and payload.get("total_cost") is not None:
-        unit_cost = float(payload["total_cost"]) / qty
+    qty = whole(payload.get("quantity"), "quantity", default=0, min_value=1)
+    unit_cost = money(payload.get("unit_cost"), "unit_cost", default=None)
+    total_cost = money(payload.get("total_cost"), "total_cost", default=None)
+    if unit_cost is None and total_cost is not None:
+        unit_cost = total_cost / qty
     # Keep a pile to a single inventory record: reuse the existing bin so a
     # second purchase never splits the pile across two rows (the bin only
     # matters on the very first buy).
@@ -157,14 +202,13 @@ def record_purchase(product_id: int, payload: dict = Body(...),
         db, custom_sku_id=sku.id, condition=BULK_CONDITION,
         printing=BULK_PRINTING, bin=bin_val)
     if payload.get("price") is not None:
-        item.current_price = payload["price"]
+        item.current_price = money(payload["price"], "price")
     # Bulk is in-store only: cap it out of every marketplace push (cap 0).
     for mk in ("ebay", "tcgplayer"):
         listing = inv_svc.get_or_create_listing(db, item, mk)
         if listing.listing_cap is None:
             listing.listing_cap = 0
-    inv_svc.add_stock(db, item, qty,
-                      float(unit_cost) if unit_cost is not None else None,
+    inv_svc.add_stock(db, item, qty, unit_cost,
                       cause="bulk_purchase",
                       comment=f"bulk purchase into {product.name}",
                       acquired_at=order_svc.parse_sale_date(payload.get("acquired_at")))
@@ -185,26 +229,24 @@ def sell_bulk(product_id: int, payload: dict = Body(...),
     item = _pile_item(db, sku) if sku else None
     if item is None or item.quantity <= 0:
         raise HTTPException(400, "no bulk stock to sell")
-    qty = int(payload.get("quantity", 0))
-    if qty <= 0:
-        raise HTTPException(400, "quantity must be > 0")
+    qty = whole(payload.get("quantity"), "quantity", default=0, min_value=1)
     if qty > item.quantity:
         raise HTTPException(400, f"only {item.quantity} cards on hand")
-    total = payload.get("total_price")
-    unit_price = payload.get("unit_price")
+    total = money(payload.get("total_price"), "total_price", default=None)
+    unit_price = money(payload.get("unit_price"), "unit_price", default=None)
     if unit_price is None:
         if total is None:
             raise HTTPException(400, "total_price or unit_price required")
-        unit_price = float(total) / qty
+        unit_price = total / qty
     order = order_svc.create_manual_order(
         db,
         buyer_name=payload.get("buyer_name") or "Bulk sale",
         items=[{"inventory_id": item.id, "quantity": qty,
-                "unit_price": float(unit_price),
+                "unit_price": unit_price,
                 "description": f"{product.name} — {qty} cards (bulk)"}],
-        total=float(total) if total is not None else None,
-        shipping_cost=float(payload.get("shipping_cost", 0) or 0),
-        marketplace_fees=float(payload.get("marketplace_fees", 0) or 0),
-        shipping_charged=float(payload.get("shipping_charged", 0) or 0),
+        total=total,
+        shipping_cost=money(payload.get("shipping_cost"), "shipping_cost", default=0.0),
+        marketplace_fees=money(payload.get("marketplace_fees"), "marketplace_fees", default=0.0),
+        shipping_charged=money(payload.get("shipping_charged"), "shipping_charged", default=0.0),
         ordered_at=payload.get("ordered_at"))
     return {"order_id": order.id, "pile": pile_dict(db, product)}

@@ -62,6 +62,66 @@ CUSTOM_CATEGORIES = [
     "Magic", "Pokémon", "One Piece", "Yu-Gi-Oh", "Supplies", "Other",
 ]
 
+# --- Bulk valuation ---------------------------------------------------------
+#
+# A bulk pile is opaque by design: nobody inventories 12,000 commons card by
+# card, so there is no catalog link and therefore no TCGplayer market price —
+# which is why piles used to value at $0. Instead a pile is valued the way the
+# trade actually prices bulk: a going rate per card for each broad grade, times
+# roughly how much of the pile is that grade.
+#
+# The grades are per game because the breakouts genuinely differ (MTG sells
+# basic land as its own category; Pokémon sells basic energy). Rates live in
+# Settings (see services/settings.DEFAULTS["bulk_rates"]) because they move with
+# the market; the grade list itself is fixed here so the settings screen and the
+# per-pile mix always agree on what the columns are.
+#
+# (key, label, default $/card)
+BULK_GRADES = {
+    "mtg": [
+        ("rare", "Rare / Mythic", 0.030),
+        ("common_uncommon", "Common / Uncommon", 0.005),
+        ("land", "Basic Land", 0.002),
+    ],
+    "pokemon": [
+        ("ultra_rare", "Ultra Rare (ex / V / GX / Full Art)", 0.250),
+        ("holo", "Holo / Reverse Holo", 0.020),
+        ("common_uncommon", "Common / Uncommon", 0.005),
+        ("energy", "Basic Energy", 0.001),
+    ],
+    "yugioh": [
+        ("secret_ultra", "Secret / Ultra / Super Rare", 0.040),
+        ("rare", "Rare", 0.008),
+        ("common_uncommon", "Common", 0.003),
+    ],
+    "onepiece": [
+        ("leader_sec", "Leader / SEC / SR", 0.100),
+        ("rare", "Rare", 0.015),
+        ("common_uncommon", "Common / Uncommon", 0.005),
+    ],
+}
+
+# Bulk piles record their game in CustomProduct.category, which uses the
+# display names in CUSTOM_CATEGORIES; BULK_GRADES is keyed by the internal game
+# code. Supplies/Other have no bulk grades — they aren't card piles.
+CATEGORY_TO_GAME = {
+    "Magic": "mtg", "Pokémon": "pokemon",
+    "One Piece": "onepiece", "Yu-Gi-Oh": "yugioh",
+}
+
+
+def bulk_grades_for(category_or_game: str | None) -> list[tuple[str, str, float]]:
+    """Grade list for a pile, accepting either a display category or game code."""
+    key = CATEGORY_TO_GAME.get(category_or_game or "", category_or_game or "")
+    return BULK_GRADES.get(key, [])
+
+
+def default_bulk_rates() -> dict[str, dict[str, float]]:
+    """The seed value for the ``bulk_rates`` setting."""
+    return {game: {key: rate for key, _label, rate in grades}
+            for game, grades in BULK_GRADES.items()}
+
+
 # Baseline price sources available to a pricing rule, in the fallback order the
 # user can reorder. Each maps to a column on PriceData (see pricing.SOURCE_FIELDS).
 PRICE_SOURCES = ["tcg_market", "tcg_mid", "tcg_low", "tcg_direct_low"]

@@ -1,9 +1,14 @@
 """Key/value settings with defaults."""
 from sqlalchemy.orm import Session
 
+from ..domain import default_bulk_rates
 from ..models import Setting
 
 DEFAULTS = {
+    # Going rate per card for each bulk grade, by game (see domain.BULK_GRADES).
+    # Bulk piles have no catalog link and so no market price; these rates plus a
+    # per-pile grade mix are what give a pile a value instead of $0.
+    "bulk_rates": default_bulk_rates(),
     "scan_folder": "",
     "min_scan_resolution": 400,          # min shorter-edge pixels before flagging
     "confidence_threshold": 0.75,        # below this -> needs_review

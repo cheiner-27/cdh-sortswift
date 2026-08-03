@@ -119,6 +119,18 @@ def ensure_schema() -> None:
                     "ALTER TABLE order_items ADD COLUMN catalog_card_id INTEGER "
                     "REFERENCES catalog_cards(id)"))
 
+    # 6) custom_products: per-pile bulk grade mix, for valuing opaque bulk that
+    #    has no catalog price. Existing piles default to {} (value unset).
+    if "custom_products" in tables:
+        cpcols = {c["name"] for c in insp.get_columns("custom_products")}
+        if "composition" not in cpcols:
+            with engine.begin() as conn:
+                conn.execute(text(
+                    "ALTER TABLE custom_products ADD COLUMN composition JSON"))
+                conn.execute(text(
+                    "UPDATE custom_products SET composition = '{}' "
+                    "WHERE composition IS NULL"))
+
     # 6) expenses.expense_class: capex vs opex classification (additive).
     #    Existing rows default to opex; backfill durable-asset categories
     #    (Equipment) to capex so the printer/scanner land in capital spend.

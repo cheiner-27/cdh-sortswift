@@ -6,9 +6,24 @@ from sqlalchemy.orm import Session
 from ..db import get_db
 from ..models import Order
 from ..services import orders as order_svc
+from ..validate import money, whole
 from .serializers import order_dict
 
 router = APIRouter(prefix="/api/orders", tags=["orders"])
+
+
+def _clean_items(items: list) -> list:
+    """Validate the money/count fields on manual-sale line items.
+
+    These feed FIFO consumption and the P&L directly, so a string price here
+    would either 500 at commit or book a bad COGS number.
+    """
+    out = []
+    for i in items:
+        out.append({**i,
+                    "quantity": whole(i.get("quantity"), "quantity", default=1, min_value=1),
+                    "unit_price": money(i.get("unit_price"), "unit_price", default=0.0)})
+    return out
 
 
 @router.get("")
@@ -88,14 +103,15 @@ def refund(order_id: int, payload: dict = Body(default={}),
     o = db.get(Order, order_id)
     if not o:
         raise HTTPException(404)
-    fees = payload.get("fees_refunded")
     try:
         return order_svc.refund_sale(
             db, o, mode=payload.get("mode", "full"),
-            amount=payload.get("amount"),
+            amount=money(payload.get("amount"), "amount", default=None),
             returned=payload.get("returned", True),
-            return_shipping=float(payload.get("return_shipping") or 0),
-            fees_refunded=None if fees is None else float(fees))
+            return_shipping=money(payload.get("return_shipping"),
+                                  "return_shipping", default=0.0),
+            fees_refunded=money(payload.get("fees_refunded"),
+                                "fees_refunded", default=None))
     except ValueError as e:
         raise HTTPException(400, str(e))
 
@@ -106,10 +122,12 @@ def edit_costs(order_id: int, payload: dict = Body(...), db: Session = Depends(g
     o = db.get(Order, order_id)
     if not o:
         raise HTTPException(404)
-    order_svc.set_order_costs(db, o, shipping_cost=payload.get("shipping_cost"),
-                              marketplace_fees=payload.get("marketplace_fees"),
-                              shipping_charged=payload.get("shipping_charged"),
-                              ordered_at=payload.get("ordered_at"))
+    order_svc.set_order_costs(
+        db, o,
+        shipping_cost=money(payload.get("shipping_cost"), "shipping_cost", default=None),
+        marketplace_fees=money(payload.get("marketplace_fees"), "marketplace_fees", default=None),
+        shipping_charged=money(payload.get("shipping_charged"), "shipping_charged", default=None),
+        ordered_at=payload.get("ordered_at"))
     return order_dict(o)
 
 
@@ -139,9 +157,10 @@ def delete_order(order_id: int, db: Session = Depends(get_db)):
 def manual_order(payload: dict = Body(...), db: Session = Depends(get_db)):
     order = order_svc.create_manual_order(
         db, buyer_name=payload.get("buyer_name", "walk-in"),
-        items=payload.get("items", []), total=payload.get("total"),
-        shipping_cost=payload.get("shipping_cost") or 0.0,
-        marketplace_fees=payload.get("marketplace_fees") or 0.0,
-        shipping_charged=payload.get("shipping_charged") or 0.0,
+        items=_clean_items(payload.get("items", [])),
+        total=money(payload.get("total"), "total", default=None),
+        shipping_cost=money(payload.get("shipping_cost"), "shipping_cost", default=0.0),
+        marketplace_fees=money(payload.get("marketplace_fees"), "marketplace_fees", default=0.0),
+        shipping_charged=money(payload.get("shipping_charged"), "shipping_charged", default=0.0),
         ordered_at=payload.get("ordered_at"))
     return order_dict(order)

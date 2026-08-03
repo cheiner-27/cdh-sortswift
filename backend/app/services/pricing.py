@@ -47,7 +47,9 @@ and can be set from the Inventory page.
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from ..domain import MARKETPLACES, MARKETPLACE_MIN_PRICE
+from ..domain import (
+    CATEGORY_TO_GAME, MARKETPLACES, MARKETPLACE_MIN_PRICE, bulk_grades_for,
+)
 from ..models import InventoryItem, PriceData, PricingConfig
 from . import inventory as inv_svc
 
@@ -170,13 +172,67 @@ def card_market_value(db: Session, card, printing: str = "normal") -> float | No
     return _market_from_rows(_price_rows(db, card.tcgplayer_product_id), printing)
 
 
+def bulk_unit_value(rates: dict, category: str | None,
+                    composition: dict | None) -> float | None:
+    """Estimated value of one card from a bulk pile, or None if unpriced.
+
+    The weighted average of the configured per-grade rates over the pile's
+    grade mix: 5% rare at $0.03 + 90% common at $0.005 + 5% land at $0.002 is
+    $0.006 a card. Percentages that don't reach 100 leave the remainder valued
+    at nothing, which is the honest reading of "I only accounted for 80% of it".
+
+    Returns None (not 0.0) when the pile has no mix set, so callers can tell
+    "worth nothing" apart from "nobody has said yet".
+    """
+    grades = bulk_grades_for(category)
+    if not grades or not composition:
+        return None
+    game_rates = (rates or {}).get(CATEGORY_TO_GAME.get(category or "", category or ""), {})
+    total = 0.0
+    seen = False
+    for key, _label, default_rate in grades:
+        pct = composition.get(key)
+        if pct is None:
+            continue
+        seen = True
+        rate = game_rates.get(key, default_rate)
+        total += (float(pct) / 100.0) * float(rate)
+    return round(total, 6) if seen else None
+
+
+def _bulk_values(db: Session, items) -> dict[int, float]:
+    """Per-card bulk value for any pile rows in ``items``, keyed by inventory id.
+
+    Loads the rate table once rather than per row — a valuation sweep can cover
+    every pile at once.
+    """
+    piles = [it for it in items
+             if it.custom_sku and it.custom_sku.product
+             and it.custom_sku.product.item_type == "bulk"]
+    if not piles:
+        return {}
+    from .settings import get_setting
+    rates = get_setting(db, "bulk_rates") or {}
+    out: dict[int, float] = {}
+    for it in piles:
+        product = it.custom_sku.product
+        value = bulk_unit_value(rates, product.category, product.composition)
+        if value is not None:
+            out[it.id] = value
+    return out
+
+
 def market_values_for_items(db: Session, items) -> dict[int, float | None]:
     """card_market_value() for a whole result set, keyed by inventory id.
 
     Batches the price lookup (one query per 500 products instead of one per
     item) so a valuation over every filtered row stays cheap — price_data is
-    the biggest table in the DB. Items without a catalog card or price row map
-    to None, same as the single-item call.
+    the biggest table in the DB.
+
+    Bulk piles have no catalog card and so no TCGplayer price; they're valued
+    from their grade mix instead (see bulk_unit_value), which is what stops a
+    pile of 12,000 commons reading as $0. Anything else without a catalog card
+    or price row still maps to None, same as the single-item call.
     """
     product_ids = sorted({
         it.card.tcgplayer_product_id for it in items
@@ -188,11 +244,14 @@ def market_values_for_items(db: Session, items) -> dict[int, float | None]:
         for row in db.execute(select(PriceData).where(
                 PriceData.tcgplayer_product_id.in_(chunk))).scalars():
             rows_by_product.setdefault(row.tcgplayer_product_id, []).append(row)
+    bulk = _bulk_values(db, items)
     values: dict[int, float | None] = {}
     for it in items:
         product_id = it.card.tcgplayer_product_id if it.card else None
-        values[it.id] = (_market_from_rows(rows_by_product.get(product_id, []), it.printing)
-                         if product_id else None)
+        if product_id:
+            values[it.id] = _market_from_rows(rows_by_product.get(product_id, []), it.printing)
+        else:
+            values[it.id] = bulk.get(it.id)
     return values
 
 

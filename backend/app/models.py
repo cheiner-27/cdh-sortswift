@@ -144,6 +144,11 @@ class CustomProduct(Base):
     upc: Mapped[str | None] = mapped_column(String, index=True, nullable=True)
     # sealed breakdown: [{"name": "...", "count": 36, "component_product_id": null}]
     breakdown_components: Mapped[list] = mapped_column(JSON, default=list)
+    # Bulk piles only: roughly what the pile is made of, as percentages keyed by
+    # the game's bulk grades — {"rare": 5, "common_uncommon": 90, "land": 5}.
+    # Multiplied by the configured per-grade rates to value an opaque pile that
+    # has no catalog price. An estimate for valuation, not a contents manifest.
+    composition: Mapped[dict] = mapped_column(JSON, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
     skus: Mapped[list["CustomSku"]] = relationship(back_populates="product", cascade="all, delete-orphan")
 

@@ -36,6 +36,37 @@ first) and the sale lands in **Orders** and the **P&L** report like any other
 sale — so you delete, cancel (restocks the pile), or refund it from the Orders
 page.
 
+## What a pile is worth
+
+A pile has no catalog card, so there's no TCGplayer price to look up — left
+alone it would value at $0, which for a sift-and-sort workflow means most of the
+cards you own read as worthless. Instead a pile is valued the way bulk is
+actually priced: a going rate per card for each broad grade, times roughly how
+much of the pile is that grade.
+
+Two things feed it:
+
+- **Settings → Bulk rates** — what one card of each grade is worth, per game.
+  Magic splits into rare/mythic, common/uncommon, and basic land; Pokémon into
+  ultra rare, holo, common/uncommon, and basic energy; Yu-Gi-Oh and One Piece
+  have their own. Set these once and they apply to every pile of that game, so
+  when the bulk market moves you edit one number, not fifty piles.
+- **The mix on each pile** — click **Set mix** (or **mix**) in the Est. value
+  column and give the rough percentage for each grade. Eyeball it; this is an
+  estimate, not a contents manifest.
+
+A pile that's 5% rares at $0.03, 90% commons at $0.005 and 5% land at $0.002 is
+worth $0.0061 a card, so 10,000 cards is $61. That number shows in the pile's
+**Est. value** column and in the **market** total on the Inventory page.
+
+Percentages don't have to reach 100 — whatever you leave out counts as $0, which
+is usually what you mean when you only bother to account for the good stuff.
+They can't add up to *over* 100. Until you set a mix the column reads **Set mix**
+rather than $0.00, so "worth nothing" and "nobody has said yet" stay distinct.
+
+This is purely for valuation. It never changes what a pile sells for, never
+touches FIFO cost, and never affects a listing.
+
 ## Notes
 
 - Quantity is always **individual cards**, so both "sold a pack of 100" and

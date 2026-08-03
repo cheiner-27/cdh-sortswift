@@ -514,7 +514,7 @@ function AdjustModal({ ids, onClose }) {
         <Field label="Mode"><select value={mode} onChange={(e) => setMode(e.target.value)}>
           <option value="delta">adjust by amount (+/−)</option>
           <option value="set">set exact quantity</option></select></Field>
-        <Field label="Value"><input style={{ width: 80 }} value={value} onChange={(e) => setValue(e.target.value)} /></Field>
+        <Field label="Value"><input type="number" step="1" style={{ width: 80 }} value={value} onChange={(e) => setValue(e.target.value)} /></Field>
       </div>
       <div className="row">
         <Field label="Comment"><input style={{ width: 300 }} value={comment} onChange={(e) => setComment(e.target.value)} /></Field>

@@ -69,3 +69,25 @@ muted line underneath always shows the auto price for comparison.
 own date and cost, oldest consumed first), supplier refunds, per-marketplace
 listing controls, and the complete audit history. **Split record** peels units
 off into a new record with a different condition, printing, or language.
+
+## What the fields accept
+
+Every quantity box — stock adjustments, bulk edit, splits, cycle counts, staged
+rows, bulk piles — takes a **whole number**. A fractional quantity like `2.5` is
+refused rather than rounded, because a half card is always a typo and quietly
+storing 2 hides it. Deltas on **Adjust stock** may be negative; everything else
+must be zero or more.
+
+Cost and price boxes take a **number**, zero or more, and are stored to the
+decimal you enter (a bulk pile's per-card cost keeps four places). Leave one
+blank to clear it — an empty price override hands the card back to autopricing.
+
+Condition, printing, and language accept only the values in their dropdowns. A
+condition that isn't a real condition is refused outright, not silently read as
+NM: those fields are part of the FIFO pool key, so a bad one would strand the
+row's cost basis rather than just look wrong in the grid.
+
+When something is refused you get a message naming the field and what it wanted,
+and **nothing is written** — a rejected adjustment leaves stock exactly as it
+was. CSV import is deliberately more forgiving, since it has to cope with other
+people's exports; see Exports & Imports.

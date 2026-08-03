@@ -6,8 +6,10 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from ..db import get_db
+from ..domain import CONDITIONS, CANONICAL_PRINTINGS, LANGUAGES
 from ..models import StagingItem
 from ..services import pricing, staging as staging_svc
+from ..validate import choice, money, whole
 from .serializers import staging_dict
 
 router = APIRouter(prefix="/api/staging", tags=["staging"])
@@ -44,6 +46,23 @@ def list_staging(source: str = "", db: Session = Depends(get_db)):
     return [_staging_dict(db, s) for s in db.execute(q).scalars()]
 
 
+# Row fields that carry a value type, checked identically on the per-row PATCH,
+# bulk edit and both add paths. Everything else on a staged row is free text.
+_ENUMS = {"condition": CONDITIONS, "printing": CANONICAL_PRINTINGS,
+          "language": LANGUAGES}
+
+
+def _clean(field: str, value):
+    """Validate one staged-row field by name; pass free text through."""
+    if field in _ENUMS:
+        return choice(value, field, _ENUMS[field])
+    if field == "quantity":
+        return whole(value, field, min_value=1)
+    if field in ("cost", "price"):
+        return money(value, field, default=None)
+    return value
+
+
 @router.patch("/{row_id}")
 def edit_row(row_id: int, payload: dict = Body(...), db: Session = Depends(get_db)):
     row = db.get(StagingItem, row_id)
@@ -52,18 +71,11 @@ def edit_row(row_id: int, payload: dict = Body(...), db: Session = Depends(get_d
     for f in ("condition", "printing", "language", "bin", "quantity",
               "cost", "price", "comment", "catalog_card_id", "source_bulk_id"):
         if f in payload:
-            setattr(row, f, payload[f])
+            setattr(row, f, _clean(f, payload[f]))
     if "acquired_at" in payload:
         row.acquired_at = _parse_date(payload["acquired_at"])
     db.commit()
     return _staging_dict(db, row)
-
-
-def _num(value, field: str) -> float:
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        raise HTTPException(400, f"{field} must be a number")
 
 
 @router.post("/bulk-edit")
@@ -82,17 +94,14 @@ def bulk_edit(payload: dict = Body(...), db: Session = Depends(get_db)):
     rows = db.execute(select(StagingItem).where(
         StagingItem.id.in_(ids))).scalars().all()
     for row in rows:
-        for f in ("condition", "printing", "language", "bin", "comment"):
+        for f in ("condition", "printing", "language", "bin", "comment",
+                  "quantity", "price"):
             if f in changes:
-                setattr(row, f, changes[f])
-        if "quantity" in changes:
-            row.quantity = max(1, int(_num(changes["quantity"], "quantity")))
-        if "price" in changes:
-            row.price = _num(changes["price"], "price")
+                setattr(row, f, _clean(f, changes[f]))
         # Cost on a bulk-pull row is ignored at approve time (the cost comes
         # from the pile it's pulled out of), so don't pretend to set it.
         if "cost" in changes and not row.source_bulk_id:
-            row.cost = _num(changes["cost"], "cost")
+            row.cost = _clean("cost", changes["cost"])
         if "acquired_at" in changes:
             row.acquired_at = _parse_date(changes["acquired_at"])
     db.commit()
@@ -124,23 +133,33 @@ def reject(payload: dict = Body(...), db: Session = Depends(get_db)):
     return {"rejected": len(rows)}
 
 
+def _row_fields(r: dict) -> dict:
+    """Validated StagingItem kwargs from one manual-entry row.
+
+    Shared by the single-row and multi-row add paths so both reject the same
+    things — a quantity of 0, a negative cost, a condition that isn't a real
+    condition — rather than only whichever one was patched last.
+    """
+    return dict(
+        catalog_card_id=r.get("catalog_card_id"),
+        custom_sku_id=r.get("custom_sku_id"),
+        condition=_clean("condition", r.get("condition") or "NM"),
+        printing=_clean("printing", r.get("printing") or "normal"),
+        language=_clean("language", r.get("language") or "en"),
+        bin=r.get("bin", ""),
+        quantity=whole(r.get("quantity"), "quantity", default=1, min_value=1),
+        cost=_clean("cost", r.get("cost")),
+        price=_clean("price", r.get("price")),
+        acquired_at=_parse_date(r.get("acquired_at")),
+        comment=r.get("comment", ""),
+        source_bulk_id=r.get("source_bulk_id"),
+    )
+
+
 @router.post("/manual-add")
 def manual_add(payload: dict = Body(...), db: Session = Depends(get_db)):
     """Full-form manual entry. direct=true skips staging (trusted intake)."""
-    fields = dict(
-        catalog_card_id=payload.get("catalog_card_id"),
-        custom_sku_id=payload.get("custom_sku_id"),
-        condition=payload.get("condition", "NM"),
-        printing=payload.get("printing", "normal"),
-        language=payload.get("language", "en"),
-        bin=payload.get("bin", ""),
-        quantity=int(payload.get("quantity", 1)),
-        cost=payload.get("cost"),
-        price=payload.get("price"),
-        acquired_at=_parse_date(payload.get("acquired_at")),
-        comment=payload.get("comment", ""),
-        source_bulk_id=payload.get("source_bulk_id"),
-    )
+    fields = _row_fields(payload)
     if not fields["catalog_card_id"] and not fields["custom_sku_id"]:
         raise HTTPException(400, "catalog_card_id or custom_sku_id required")
     if payload.get("direct"):
@@ -166,18 +185,7 @@ def bulk_add(payload: dict = Body(...), db: Session = Depends(get_db)):
     for r in rows:
         if not r.get("catalog_card_id") and not r.get("custom_sku_id"):
             continue
-        fields = dict(
-            catalog_card_id=r.get("catalog_card_id"),
-            custom_sku_id=r.get("custom_sku_id"),
-            condition=r.get("condition", "NM"),
-            printing=r.get("printing", "normal"),
-            language=r.get("language", "en"),
-            bin=r.get("bin", ""),
-            quantity=int(r.get("quantity", 1)),
-            cost=r.get("cost"), price=r.get("price"),
-            acquired_at=_parse_date(r.get("acquired_at")),
-            comment=r.get("comment", ""),
-            source_bulk_id=r.get("source_bulk_id"))
+        fields = _row_fields(r)
         if direct:
             staging_svc.add_direct(db, **fields)
         else:

@@ -6,6 +6,7 @@ from sqlalchemy.orm import Session
 from ..db import get_db
 from ..models import CustomProduct, CustomSku, InventoryItem
 from ..services import inventory as inv_svc
+from ..validate import money, whole
 
 router = APIRouter(prefix="/api/custom", tags=["custom"])
 
@@ -112,8 +113,9 @@ def break_down_sealed(inventory_id: int, payload: dict = Body(default={}),
         raise HTTPException(400, "no sealed units in stock")
 
     parent_cost = inv_svc.fifo_unit_cost(db, parent) or 0.0
-    total_units = sum(int(c.get("count", 0)) for c in components) or 1
-    markup_pct = float(payload.get("markup_pct", 0))
+    total_units = sum(whole(c.get("count"), "count", default=0)
+                      for c in components) or 1
+    markup_pct = money(payload.get("markup_pct"), "markup_pct", default=0.0)
     created = []
 
     inv_svc.apply_delta(db, parent, -1, type="deduction", cause="breakdown",
@@ -122,7 +124,7 @@ def break_down_sealed(inventory_id: int, payload: dict = Body(default={}),
 
     for comp in components:
         comp_product_id = comp.get("component_product_id")
-        count = int(comp.get("count", 1))
+        count = whole(comp.get("count"), "count", default=1, min_value=1)
         if comp_product_id:
             comp_product = db.get(CustomProduct, comp_product_id)
         else:
@@ -142,7 +144,7 @@ def break_down_sealed(inventory_id: int, payload: dict = Body(default={}),
         item = inv_svc.find_or_create_item(db, custom_sku_id=sku.id,
                                            condition="NM", bin=parent.bin)
         unit_cost = round(parent_cost / total_units, 4)
-        unit_price = comp.get("unit_price")
+        unit_price = money(comp.get("unit_price"), "unit_price", default=None)
         if unit_price is None and markup_pct:
             unit_price = round(unit_cost * (100 + markup_pct) / 100.0, 2)
         if unit_price is not None:

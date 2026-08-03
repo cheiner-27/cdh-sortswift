@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session
 from ..db import get_db
 from ..models import ImportBatch, ImportRow
 from ..services import importing
+from ..validate import whole
 from .serializers import import_batch_dict
 
 router = APIRouter(prefix="/api/imports", tags=["imports"])
@@ -83,7 +84,11 @@ def resolve_row(row_id: int, payload: dict = Body(...), db: Session = Depends(ge
     if row.status != "ambiguous":
         raise HTTPException(400, "row is not ambiguous")
     try:
-        importing.resolve_ambiguous_row(db, row, int(payload["card_id"]),
+        # The row-level import data stays permissive (see services/importing);
+        # this is the user clicking a specific candidate, so it's an id or a 400.
+        card_id = whole(payload.get("card_id"), "card_id", min_value=1,
+                        max_value=None)
+        importing.resolve_ambiguous_row(db, row, card_id,
                                         payload.get("to_staging", True))
     except ValueError as e:
         raise HTTPException(400, str(e))

@@ -107,6 +107,18 @@ export default function SettingsPage() {
       </div>
 
       <div className="panel">
+        <h3 style={{ marginTop: 0 }}>Bulk rates</h3>
+        <p className="muted" style={{ marginTop: 0, maxWidth: 900 }}>
+          What one card of each grade is worth, per game. Bulk piles have no catalog
+          price, so these rates — times the grade mix you set on each pile — are what
+          give a pile a value instead of $0. Estimates for valuation only; they never
+          affect what a pile actually sells for.
+        </p>
+        <BulkRateEditor grades={meta?.bulk_grades || {}} value={s.bulk_rates || {}}
+          onChange={(v) => upd('bulk_rates', v)} />
+      </div>
+
+      <div className="panel">
         <h3 style={{ marginTop: 0 }}>Pick list</h3>
         <p className="muted" style={{ marginTop: 0 }}>
           Order the merged pick list to match how you organize stock. Rows sort by these
@@ -121,6 +133,37 @@ export default function SettingsPage() {
         <button className="primary" onClick={save}>Save all settings</button>
         <Msg msg={msg} />
       </div>
+    </div>
+  )
+}
+
+const GAME_LABELS = { mtg: 'Magic', pokemon: 'Pokémon', yugioh: 'Yu-Gi-Oh', onepiece: 'One Piece' }
+
+// Per-card going rate for each bulk grade, grouped by game. Rates are typed in
+// dollars and kept as entered (a rate is routinely a fraction of a cent, so
+// this is one of the few places 4 decimals matter).
+function BulkRateEditor({ grades, value, onChange }) {
+  const setRate = (game, key, raw) => onChange({
+    ...value, [game]: { ...(value[game] || {}), [key]: raw === '' ? 0 : Number(raw) },
+  })
+  const games = Object.keys(grades)
+  if (games.length === 0) return null
+  return (
+    <div>
+      {games.map((game) => (
+        <div key={game} style={{ marginBottom: 12 }}>
+          <b>{GAME_LABELS[game] || game}</b>
+          <div className="row" style={{ marginTop: 4 }}>
+            {grades[game].map((g) => (
+              <Field key={g.key} label={`${g.label} ($/card)`}>
+                <input type="number" step="0.001" min="0" style={{ width: 90 }}
+                  value={(value[game] || {})[g.key] ?? 0}
+                  onChange={(e) => setRate(game, g.key, e.target.value)} />
+              </Field>
+            ))}
+          </div>
+        </div>
+      ))}
     </div>
   )
 }

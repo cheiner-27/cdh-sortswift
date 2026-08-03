@@ -12,6 +12,7 @@ export default function BulkPage() {
   const [creating, setCreating] = useState(false)
   const [buyPile, setBuyPile] = useState(null)
   const [sellPile, setSellPile] = useState(null)
+  const [mixPile, setMixPile] = useState(null)
 
   const refresh = () => api.get('/api/bulk/piles').then(setPiles)
   useEffect(() => { refresh() }, [])
@@ -43,7 +44,8 @@ export default function BulkPage() {
       <div className="panel table-wrap"><table>
         <thead><tr>
           <th>Pile</th><th>Game</th><th>On hand</th><th>Cost basis</th>
-          <th>Avg $/card</th><th>Next $/card (FIFO)</th><th>Sell price</th><th></th>
+          <th>Avg $/card</th><th>Next $/card (FIFO)</th>
+          <th>Est. value</th><th>Sell price</th><th></th>
         </tr></thead>
         <tbody>{piles.map((p) => (
           <tr key={p.id}>
@@ -55,6 +57,17 @@ export default function BulkPage() {
             <td>{p.avg_unit_cost == null ? '—' : `$${p.avg_unit_cost.toFixed(4)}`}</td>
             <td title="Cost of the next cards to sell (oldest batch)">
               {p.next_unit_cost == null ? '—' : `$${p.next_unit_cost.toFixed(4)}`}</td>
+            <td title="On-hand count x the per-card value implied by this pile's grade mix">
+              {p.unit_value == null
+                ? <button className="small" onClick={() => setMixPile(p)}>Set mix</button>
+                : <span>
+                  <b>{fmtMoney(p.market_value)}</b>
+                  <div className="muted" style={{ fontSize: 12 }}>
+                    ${p.unit_value.toFixed(4)}/card ·{' '}
+                    <a href="#" onClick={(e) => { e.preventDefault(); setMixPile(p) }}>mix</a>
+                  </div>
+                </span>}
+            </td>
             <td>{fmtMoney(p.current_price)}</td>
             <td className="row" style={{ marginBottom: 0 }}>
               <button className="small primary" onClick={() => setBuyPile(p)}>Buy</button>
@@ -73,7 +86,62 @@ export default function BulkPage() {
         onDone={() => { setBuyPile(null); refresh() }} />}
       {sellPile && <SellModal pile={sellPile} onClose={() => setSellPile(null)}
         onDone={() => { setSellPile(null); refresh() }} />}
+      {mixPile && <MixModal pile={mixPile} onClose={() => setMixPile(null)}
+        onDone={() => { setMixPile(null); refresh() }} />}
     </div>
+  )
+}
+
+// Roughly what a pile is made of, as percentages across the game's bulk grades.
+// Multiplied by the rates in Settings to value a pile that has no catalog price.
+function MixModal({ pile, onClose, onDone }) {
+  const [msg, ok, err] = useMsg()
+  const [mix, setMix] = useState(pile.composition || {})
+  const grades = pile.grades || []
+  const total = grades.reduce((sum, g) => sum + (Number(mix[g.key]) || 0), 0)
+  const submit = async () => {
+    try {
+      await api.patch(`/api/bulk/piles/${pile.id}`, { composition: mix })
+      onDone()
+    } catch (e) { err(e) }
+  }
+  if (grades.length === 0) {
+    return (
+      <Modal title={`Grade mix — ${pile.name}`} onClose={onClose}>
+        <p className="muted">“{pile.game}” has no bulk grades defined, so this pile
+          can’t be valued by mix. Only card games (Magic, Pokémon, Yu-Gi-Oh, One Piece)
+          have bulk rates.</p>
+      </Modal>
+    )
+  }
+  return (
+    <Modal title={`Grade mix — ${pile.name}`} onClose={onClose}>
+      <p className="muted" style={{ marginTop: 0, maxWidth: 620 }}>
+        Roughly what share of this pile is each grade. Eyeball it — this only drives the
+        estimated value, never what the pile sells for. Rates come from <b>Settings →
+        Bulk rates</b>. Anything you leave out is counted as worthless.
+      </p>
+      {grades.map((g) => (
+        <div className="row" key={g.key}>
+          <Field label={`${g.label} (%)`}>
+            <input type="number" min="0" max="100" step="1" style={{ width: 80 }}
+              value={mix[g.key] ?? ''}
+              onChange={(e) => setMix({
+                ...mix, [g.key]: e.target.value === '' ? undefined : Number(e.target.value),
+              })} />
+          </Field>
+        </div>
+      ))}
+      <p className={total > 100 ? 'error-text' : 'muted'}>
+        Totals <b>{total}%</b>
+        {total > 100 && ' — cannot exceed 100%'}
+        {total < 100 && total > 0 && ` — the other ${100 - total}% counts as $0`}
+      </p>
+      <div className="row center">
+        <button className="primary" disabled={total > 100} onClick={submit}>Save mix</button>
+        <Msg msg={msg} />
+      </div>
+    </Modal>
   )
 }
 

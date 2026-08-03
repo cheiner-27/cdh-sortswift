@@ -4,15 +4,33 @@ from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
 from ..db import get_db
+from ..domain import CONDITIONS, CANONICAL_PRINTINGS, LANGUAGES
 from ..models import (
     CatalogCard, CycleCount, CycleCountLine, InventoryItem, InventoryLog, utcnow,
 )
+from ..validate import choice, mapping, money, whole
 from ..services import inventory as inv_svc
 from ..services import pricing
 from ..services import reports as report_svc
 from .serializers import inventory_dict
 
 router = APIRouter(prefix="/api/inventory", tags=["inventory"])
+
+# Identity fields shared by the single-row PATCH and bulk edit. Condition and
+# printing are part of the FIFO pool key, so an unrecognized value here doesn't
+# just look wrong in the grid — it orphans the row's cost basis.
+_IDENTITY_OPTIONS = {
+    "condition": CONDITIONS,
+    "printing": CANONICAL_PRINTINGS,
+    "language": LANGUAGES,
+}
+
+
+def _identity_value(field: str, value):
+    """Validate condition/printing/language; pass anything else through."""
+    if field in _IDENTITY_OPTIONS:
+        return choice(value, field, _IDENTITY_OPTIONS[field])
+    return value
 
 
 def filter_items(db: Session, params: dict) -> list[InventoryItem]:
@@ -177,10 +195,14 @@ def update(item_id: int, payload: dict = Body(...), db: Session = Depends(get_db
     if "bin" in payload and payload["bin"] != item.bin:
         inv_svc.transfer_bin(db, item, payload["bin"], comment=payload.get("comment", ""))
     old_condition, old_printing = item.condition, item.printing
-    for f in ("condition", "printing", "language", "comment",
-              "price_override", "price_floor", "current_price"):
+    for f in ("condition", "printing", "language", "comment"):
         if f in payload:
-            setattr(item, f, payload[f])
+            setattr(item, f, _identity_value(f, payload[f]))
+    for f in ("price_override", "price_floor", "current_price"):
+        if f in payload:
+            # default=None so clearing a price (the frontend sends null for an
+            # empty box) still works, while "free" or NaN is a 400 not a 500.
+            setattr(item, f, money(payload[f], f, default=None))
     # Condition/printing are part of the FIFO pool key, so a change must carry
     # the acquisition batches with it (else cost/age/lots orphan). See
     # inv_svc.rekey_cost_basis.
@@ -189,9 +211,11 @@ def update(item_id: int, payload: dict = Body(...), db: Session = Depends(get_db
                                  old_printing=old_printing)
     for l in payload.get("listings", []):
         listing = inv_svc.get_or_create_listing(db, item, l["marketplace"])
-        for f in ("listing_cap", "reserve_quantity"):
-            if f in l:
-                setattr(listing, f, l[f])
+        if "listing_cap" in l:  # null = uncapped, 0 = excluded
+            listing.listing_cap = whole(l["listing_cap"], "listing_cap", default=None)
+        if "reserve_quantity" in l:
+            listing.reserve_quantity = whole(l["reserve_quantity"],
+                                             "reserve_quantity", default=0)
         listing.dirty = True
     item.updated_at = utcnow()
     db.commit()
@@ -210,15 +234,24 @@ def adjust(payload: dict = Body(...), db: Session = Depends(get_db)):
         comment = adj.get("comment", "")
         if adj.get("damaged"):
             comment = f"[DAMAGED] {comment}".strip()
-        if adj.get("set_quantity") is not None:
-            delta = int(adj["set_quantity"]) - item.quantity
+        # Dispatch on which key is present, not on its value: the modal sends
+        # exactly one, and a null value means the box was blank or unparseable
+        # (Number("abc") is NaN, which JSON-encodes as null). Defaulting that to
+        # a 0 delta would swallow the mistake as a silent no-op, so it 400s.
+        if "set_quantity" in adj:
+            delta = whole(adj["set_quantity"], "set_quantity") - item.quantity
+        elif "delta" in adj:
+            # A delta is the one quantity field that may be negative.
+            delta = whole(adj["delta"], "delta", min_value=None)
         else:
-            delta = int(adj.get("delta", 0))
+            delta = 0
         applied = inv_svc.apply_delta(db, item, delta, type="adjustment",
                                       cause=adj.get("cause", "manual"),
                                       comment=comment)
         if applied > 0:
-            inv_svc.record_acquisition(db, item, applied, adj.get("unit_cost"))
+            inv_svc.record_acquisition(
+                db, item, applied,
+                money(adj.get("unit_cost"), "unit_cost", default=None))
         results.append({"inventory_id": item.id, "applied": applied,
                         "quantity": item.quantity})
     db.commit()
@@ -236,48 +269,49 @@ def bulk_edit(payload: dict = Body(...), db: Session = Depends(get_db)):
     for item in items:
         entry = {"inventory_id": item.id, "changes": {}}
         if "price" in changes:
-            entry["changes"]["current_price"] = changes["price"]
+            entry["changes"]["current_price"] = money(changes["price"], "price")
         if "price_override" in changes:
-            entry["changes"]["price_override"] = changes["price_override"]
+            entry["changes"]["price_override"] = money(changes["price_override"],
+                                                       "price_override")
         if "clear_price_override" in changes:
             entry["changes"]["price_override"] = None
         if "price_floor" in changes:
-            entry["changes"]["price_floor"] = changes["price_floor"]
+            entry["changes"]["price_floor"] = money(changes["price_floor"], "price_floor")
         if "clear_price_floor" in changes:
             entry["changes"]["price_floor"] = None
         if "comment" in changes:
             entry["changes"]["comment"] = changes["comment"]
         if "bin" in changes and changes["bin"] != item.bin:
             entry["changes"]["bin"] = changes["bin"]
-        if "condition" in changes:
-            entry["changes"]["condition"] = changes["condition"]
-        if "printing" in changes:
-            entry["changes"]["printing"] = changes["printing"]
-        if "language" in changes:
-            entry["changes"]["language"] = changes["language"]
+        for f in ("condition", "printing", "language"):
+            if f in changes:
+                entry["changes"][f] = _identity_value(f, changes[f])
         if "cost" in changes:
             cost = changes["cost"]
             if isinstance(cost, dict):  # {"pct_of_price": 60} or {"flat": 0.1}
+                pct = money(cost.get("pct_of_price"), "pct_of_price", default=None)
                 base = item.price_override or item.current_price
-                v = (base * cost["pct_of_price"] / 100.0) if cost.get("pct_of_price") and base \
-                    else cost.get("flat")
+                v = (base * pct / 100.0) if pct and base \
+                    else money(cost.get("flat"), "flat", default=None)
             else:
-                v = cost
+                v = money(cost, "cost", default=None)
             existing = inv_svc.fifo_unit_cost(db, item)
             if v is not None and (changes.get("cost_overwrite") or existing is None):
                 entry["changes"]["_backfill_cost"] = round(v, 4)
         if "quantity" in changes:
-            qc = changes["quantity"]  # {"set": n} | {"add": n} | {"subtract": n}
+            # {"set": n} | {"add": n} | {"subtract": n} — all non-negative; the
+            # operation carries the sign, so a negative here is a mistake.
+            qc = mapping(changes["quantity"], "quantity")
             if qc.get("set") is not None:
-                entry["changes"]["_qty_delta"] = qc["set"] - item.quantity
+                entry["changes"]["_qty_delta"] = whole(qc["set"], "quantity.set") - item.quantity
             elif qc.get("add"):
-                entry["changes"]["_qty_delta"] = qc["add"]
+                entry["changes"]["_qty_delta"] = whole(qc["add"], "quantity.add")
             elif qc.get("subtract"):
-                entry["changes"]["_qty_delta"] = -qc["subtract"]
+                entry["changes"]["_qty_delta"] = -whole(qc["subtract"], "quantity.subtract")
         for mk in ("ebay", "tcgplayer"):
             cap_key = f"{mk}_listing_cap"
             if cap_key in changes:
-                entry["changes"][cap_key] = changes[cap_key]
+                entry["changes"][cap_key] = whole(changes[cap_key], cap_key, default=None)
         if entry["changes"]:
             plan.append(entry)
     if preview:
@@ -342,12 +376,12 @@ def supplier_refund(item_id: int, payload: dict = Body(...), db: Session = Depen
         raise HTTPException(404)
     mode = payload.get("mode", "partial")
     if mode == "full":
-        qty = int(payload.get("quantity", 0))
+        qty = whole(payload.get("quantity"), "quantity", default=0)
         if qty <= 0 or qty > item.quantity:
             raise HTTPException(400, "invalid return quantity")
         r = inv_svc.return_to_supplier(db, item, qty, comment=payload.get("comment", ""))
     else:
-        amount = float(payload.get("amount", 0) or 0)
+        amount = money(payload.get("amount"), "amount", default=0.0)
         if amount <= 0:
             raise HTTPException(400, "refund amount must be positive")
         r = inv_svc.reduce_cost_basis(db, item, amount, comment=payload.get("comment", ""))
@@ -362,13 +396,12 @@ def split(item_id: int, payload: dict = Body(...), db: Session = Depends(get_db)
     item = db.get(InventoryItem, item_id)
     if not item:
         raise HTTPException(404)
-    qty = int(payload.get("quantity", 0))
+    qty = whole(payload.get("quantity"), "quantity", default=0)
     if qty <= 0 or qty > item.quantity:
         raise HTTPException(400, "invalid split quantity")
     new_attrs = {
-        "condition": payload.get("condition", item.condition),
-        "printing": payload.get("printing", item.printing),
-        "language": payload.get("language", item.language),
+        f: _identity_value(f, payload[f]) if f in payload else getattr(item, f)
+        for f in ("condition", "printing", "language")
     }
     if all(new_attrs[k] == getattr(item, k) for k in new_attrs):
         raise HTTPException(400, "split blocked: at least one attribute must differ")
@@ -539,7 +572,8 @@ def update_count_line(line_id: int, payload: dict = Body(...),
     line = db.get(CycleCountLine, line_id)
     if not line:
         raise HTTPException(404)
-    line.counted = payload.get("counted")
+    # default=None: clearing a tally back to uncounted (red) is a valid edit.
+    line.counted = whole(payload.get("counted"), "counted", default=None)
     db.commit()
     return {"ok": True}
 

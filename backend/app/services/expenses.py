@@ -15,10 +15,28 @@ from ..domain import (
     default_expense_class,
 )
 from ..models import Expense
+from ..validate import choice, money, whole
 from .settings import get_setting
 
 FIELDS = ("date", "name", "category", "expense_class", "retailer",
           "payment_method", "quantity", "subtotal", "tax_override", "notes")
+
+
+def _clean(field: str, value):
+    """Validate one expense field by name; pass free text through.
+
+    Subtotal and tax feed the net-profit roll-up, so a string here used to
+    reach the ORM and blow up at commit with a raw StatementError.
+    """
+    if field == "quantity":
+        return whole(value, field, default=1, min_value=1)
+    if field == "subtotal":
+        return money(value, field, default=0.0)
+    if field == "tax_override":  # null = fall back to the configured rate
+        return money(value, field, default=None)
+    if field == "expense_class":
+        return choice(value, field, EXPENSE_CLASSES, default=None)
+    return value
 
 
 def default_rate(db: Session) -> float:
@@ -64,7 +82,7 @@ def list_expenses(db: Session, date_from: str | None = None,
 
 
 def create_expense(db: Session, payload: dict) -> Expense:
-    e = Expense(**{f: payload.get(f) for f in FIELDS if f in payload})
+    e = Expense(**{f: _clean(f, payload.get(f)) for f in FIELDS if f in payload})
     if e.quantity is None:
         e.quantity = 1
     if not e.expense_class:  # not supplied — infer from the category
@@ -77,7 +95,7 @@ def create_expense(db: Session, payload: dict) -> Expense:
 def update_expense(db: Session, e: Expense, payload: dict) -> Expense:
     for f in FIELDS:
         if f in payload:
-            setattr(e, f, payload[f])
+            setattr(e, f, _clean(f, payload[f]))
     db.commit()
     return e
 

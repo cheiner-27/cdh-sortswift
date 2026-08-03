@@ -7,14 +7,33 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from ..db import get_db
+from ..domain import CONDITIONS, CANONICAL_PRINTINGS, LANGUAGES
 from ..models import CatalogCard, ProcessedScan, ScanPull, ScanQueueItem
 from ..services import (
     cloud_recognition, exporting, pricing, scanning, staging as staging_svc,
 )
 from ..services.settings import get_setting
+from ..validate import choice, money, whole
 from .serializers import scan_item_dict
 
 router = APIRouter(prefix="/api/scans", tags=["scans"])
+
+# Queue-row fields carrying a value type. A confirmed scan is copied verbatim
+# into staging (services/staging.stage_scan_item), so a bad quantity or cost
+# here lands in the FIFO batch a step later — check it at the edit, not after.
+_ENUMS = {"condition": CONDITIONS, "printing": CANONICAL_PRINTINGS,
+          "language": LANGUAGES}
+
+
+def _clean(field: str, value):
+    """Validate one queue-row field by name; pass free text through."""
+    if field in _ENUMS:
+        return choice(value, field, _ENUMS[field])
+    if field == "quantity":
+        return whole(value, field, min_value=1)
+    if field == "cost":
+        return money(value, field, default=None)
+    return value
 
 
 def _scan_dict(db: Session, item: ScanQueueItem) -> dict:
@@ -121,7 +140,7 @@ def update_item(item_id: int, payload: dict = Body(...), db: Session = Depends(g
     for field in ("card_id", "condition", "printing", "language", "bin",
                   "quantity", "cost", "status", "source_bulk_id"):
         if field in payload:
-            setattr(item, field, payload[field])
+            setattr(item, field, _clean(field, payload[field]))
     if "card_id" in payload and payload["card_id"]:
         card = db.get(CatalogCard, payload["card_id"])
         if card is None:
@@ -155,7 +174,7 @@ def bulk_update(payload: dict = Body(...), db: Session = Depends(get_db)):
             for f in ("condition", "printing", "language", "bin", "quantity",
                       "cost", "source_bulk_id"):
                 if f in payload.get("values", {}):
-                    setattr(it, f, payload["values"][f])
+                    setattr(it, f, _clean(f, payload["values"][f]))
             count += 1
         elif action == "approve":
             if it.card_id is None:

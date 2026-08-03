@@ -9,6 +9,7 @@ from ..domain import MARKETPLACES
 from ..models import InventoryItem, ListingRule, MarketplaceAccount, MarketplaceListing
 from ..services.marketplaces import sync as sync_svc
 from ..services.marketplaces import tcgplayer as tcg_csv
+from ..validate import whole
 from .inventory import filter_items
 
 router = APIRouter(prefix="/api/marketplaces", tags=["marketplaces"])
@@ -50,7 +51,9 @@ def update_account(marketplace: str, payload: dict = Body(...),
         if payload["status"] == "disconnected":
             acct.credentials = {}  # Disconnect revokes credentials
     if "poll_interval_minutes" in payload:
-        acct.poll_interval_minutes = int(payload["poll_interval_minutes"])
+        acct.poll_interval_minutes = whole(
+            payload["poll_interval_minutes"], "poll_interval_minutes",
+            default=10, min_value=1, max_value=1440)
     if "auto_push_on_add" in payload:
         acct.auto_push_on_add = bool(payload["auto_push_on_add"])
     db.commit()

@@ -4,8 +4,8 @@ from sqlalchemy.orm import Session
 
 from ..db import get_db
 from ..domain import (
-    CANONICAL_PRINTINGS, CONDITIONS, CUSTOM_CATEGORIES, GAMES, LANGUAGES,
-    MARKETPLACES, PRICE_SOURCES, RARITY_TIERS, ROUNDING_OPTIONS,
+    BULK_GRADES, CANONICAL_PRINTINGS, CONDITIONS, CUSTOM_CATEGORIES, GAMES,
+    LANGUAGES, MARKETPLACES, PRICE_SOURCES, RARITY_TIERS, ROUNDING_OPTIONS,
 )
 from ..services import reports as report_svc
 from ..services.settings import all_settings, set_setting
@@ -22,7 +22,11 @@ def meta():
             "marketplaces": MARKETPLACES, "rarities": RARITY_TIERS,
             "custom_categories": CUSTOM_CATEGORIES,
             "price_sources": PRICE_SOURCES, "rounding_options": ROUNDING_OPTIONS,
-            "pick_sort_fields": list(PICK_SORT_FIELDS)}
+            "pick_sort_fields": list(PICK_SORT_FIELDS),
+            # Bulk grade columns per game, so Settings (rates) and the Bulk page
+            # (per-pile mix) render the same list without hardcoding either.
+            "bulk_grades": {game: [{"key": k, "label": lbl} for k, lbl, _ in grades]
+                            for game, grades in BULK_GRADES.items()}}
 
 
 @router.get("/settings")
