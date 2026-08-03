@@ -1,7 +1,7 @@
 """Shared JSON serializers for ORM objects."""
 from ..models import (
     CatalogCard, ImportBatch, InventoryItem, Lot, MarketplaceListing, Order,
-    ScanQueueItem, StagingItem,
+    ScanQueueItem, SlipBatch, SlipOrder, StagingItem,
 )
 
 
@@ -106,6 +106,36 @@ def order_dict(o: Order) -> dict:
             "cogs": li.cogs,
         } for li in o.items],
     }
+
+
+def slip_order_dict(s: SlipOrder) -> dict:
+    return {
+        "id": s.id, "batch_id": s.batch_id, "order_number": s.order_number,
+        "buyer_name": s.buyer_name,
+        "ordered_at": s.ordered_at.isoformat() if s.ordered_at else None,
+        "ship_city": s.ship_city, "ship_state": s.ship_state,
+        "ship_postal_code": s.ship_postal_code,
+        "item_total": s.item_total, "quantity_total": s.quantity_total,
+        "reconciled": s.reconciled, "shipping_charged": s.shipping_charged,
+        "tax": s.tax, "estimated_fee": s.estimated_fee,
+        "fee_detail": s.fee_detail, "lines": s.lines,
+        "page_count": s.page_count, "status": s.status, "error": s.error,
+        "warning": s.warning, "order_id": s.order_id,
+    }
+
+
+def slip_batch_dict(b: SlipBatch, with_orders: bool = False) -> dict:
+    counts: dict[str, int] = {}
+    for s in b.orders:
+        counts[s.status] = counts.get(s.status, 0) + 1
+    d = {
+        "id": b.id, "filename": b.filename, "marketplace": b.marketplace,
+        "status": b.status, "order_count": len(b.orders), "counts": counts,
+        "created_at": b.created_at.isoformat() if b.created_at else None,
+    }
+    if with_orders:
+        d["orders"] = [slip_order_dict(s) for s in b.orders]
+    return d
 
 
 def import_batch_dict(b: ImportBatch, with_rows: bool = False) -> dict:

@@ -583,3 +583,57 @@ class OrderItem(Base):
     cogs: Mapped[float] = mapped_column(Float, default=0.0)  # filled by FIFO at deduction time
     order: Mapped[Order] = relationship(back_populates="items")
     item: Mapped[InventoryItem | None] = relationship()
+
+
+class SlipBatch(Base):
+    """One uploaded packing-slip PDF, held for review before it becomes orders."""
+    __tablename__ = "slip_batches"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    filename: Mapped[str] = mapped_column(String, default="")
+    marketplace: Mapped[str] = mapped_column(String, default="tcgplayer")
+    status: Mapped[str] = mapped_column(String, default="review", index=True)
+    # review | committed | partially_committed
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    orders: Mapped[list["SlipOrder"]] = relationship(
+        back_populates="batch", cascade="all, delete-orphan")
+
+
+class SlipOrder(Base):
+    """One parsed packing slip awaiting review.
+
+    Line items live in ``lines`` as JSON rather than in their own table: they are
+    only ever read and written together with their order, resolving one is a
+    field update rather than a relationship change, and nothing else in the app
+    joins against them. ``ImportRow.candidates`` already carries per-row match
+    candidates the same way.
+    """
+    __tablename__ = "slip_orders"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    batch_id: Mapped[int] = mapped_column(ForeignKey("slip_batches.id"), index=True)
+    order_number: Mapped[str] = mapped_column(String, index=True)
+    buyer_name: Mapped[str] = mapped_column(String, default="")
+    ordered_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    ship_city: Mapped[str] = mapped_column(String, default="")
+    ship_state: Mapped[str] = mapped_column(String, default="")
+    ship_postal_code: Mapped[str] = mapped_column(String, default="")
+    # Totals as printed on the slip. Kept alongside the parsed lines because
+    # they independently confirm the parse (see services/pdf_slips.reconciles).
+    item_total: Mapped[float] = mapped_column(Float, default=0.0)
+    quantity_total: Mapped[int] = mapped_column(Integer, default=0)
+    reconciled: Mapped[bool] = mapped_column(Boolean, default=False)
+    shipping_charged: Mapped[float] = mapped_column(Float, default=0.0)
+    # Buyer-paid tax. NULL means "estimate it from the destination state" — the
+    # slip never prints it (see services/orders.estimate_marketplace_fee).
+    tax: Mapped[float | None] = mapped_column(Float, nullable=True)
+    estimated_fee: Mapped[float] = mapped_column(Float, default=0.0)
+    fee_detail: Mapped[dict] = mapped_column(JSON, default=dict)
+    lines: Mapped[list] = mapped_column(JSON, default=list)
+    page_count: Mapped[int] = mapped_column(Integer, default=1)
+    status: Mapped[str] = mapped_column(String, default="ready", index=True)
+    # ready | blocked | committed | duplicate
+    error: Mapped[str | None] = mapped_column(String, nullable=True)
+    # Non-blocking caution, e.g. a same-day same-total order recorded under a
+    # different id (a sale migrated from Airtable). Surfaced, never enforced.
+    warning: Mapped[str | None] = mapped_column(String, nullable=True)
+    order_id: Mapped[int | None] = mapped_column(ForeignKey("orders.id"), nullable=True)
+    batch: Mapped[SlipBatch] = relationship(back_populates="orders")

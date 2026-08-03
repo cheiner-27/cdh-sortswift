@@ -12,6 +12,7 @@ const DOCS = [
   ['catalog-sync', 'Catalog & price sync'],
   ['exports-imports', 'Exports & imports'],
   ['lots', 'Bulk lots'],
+  ['order-intake', 'Order intake'],
   ['orders', 'Orders & refunds'],
   ['expenses', 'Expenses'],
   ['cycle-counts', 'Cycle counts'],

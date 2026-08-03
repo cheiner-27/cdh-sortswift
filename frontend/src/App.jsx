@@ -10,6 +10,7 @@ import PricingPage from './pages/PricingPage.jsx'
 import MarketplacesPage from './pages/MarketplacesPage.jsx'
 import LotsPage from './pages/LotsPage.jsx'
 import OrdersPage from './pages/OrdersPage.jsx'
+import OrderIntakePage from './pages/OrderIntakePage.jsx'
 import ReportsPage from './pages/ReportsPage.jsx'
 import CustomItemsPage from './pages/CustomItemsPage.jsx'
 import BulkPage from './pages/BulkPage.jsx'
@@ -35,6 +36,7 @@ const nav = [
   { to: '/pricing', label: 'Pricing' },
   { to: '/marketplaces', label: 'Marketplaces' },
   { to: '/lots', label: 'Lots' },
+  { to: '/order-intake', label: 'Order Intake' },
   { to: '/orders', label: 'Orders' },
   { section: 'Data' },
   { to: '/reports', label: 'Reports' },
@@ -71,6 +73,7 @@ export default function App() {
           <Route path="/pricing" element={<PricingPage />} />
           <Route path="/marketplaces" element={<MarketplacesPage />} />
           <Route path="/lots" element={<LotsPage />} />
+          <Route path="/order-intake" element={<OrderIntakePage />} />
           <Route path="/orders" element={<OrdersPage />} />
           <Route path="/reports" element={<ReportsPage />} />
           <Route path="/purchases" element={<PurchasesPage />} />

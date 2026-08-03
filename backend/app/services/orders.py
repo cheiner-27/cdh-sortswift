@@ -1,13 +1,14 @@
 """Order fulfillment (Section 8): pick lists, packing slips, Shippo labels,
 mark-shipped, refunds/cancellations."""
 import logging
+import math
 from datetime import datetime, timezone
 
 import httpx
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from ..domain import CONDITIONS
+from ..domain import CONDITIONS, state_tax_rate
 from ..models import InventoryItem, Order, collector_number_key, utcnow
 from . import inventory as inv_svc
 from .exporting import internal_sku
@@ -302,6 +303,51 @@ def refund_sale(db: Session, order: Order, *, mode: str = "full",
             "fees_refunded": order.fees_refunded,
             "return_shipping_cost": order.return_shipping_cost,
             "restocked": restocked, "unlinked_lines": unlinked}
+
+
+def ceil_cent(value: float) -> float:
+    """Round up to the nearest cent. Marketplace fees are billed on cent-rounded
+    percentages, so a fee computed from unrounded products is systematically a
+    hair low."""
+    return math.ceil(round(value, 6) * 100) / 100.0
+
+
+def estimate_marketplace_fee(db: Session, *, subtotal: float,
+                             shipping_charged: float = 0.0,
+                             tax: float | None = None,
+                             state: str | None = None) -> dict:
+    """Anticipated TCGplayer fee on an order, before the payout confirms it.
+
+    Commission applies to items plus the shipping the buyer paid; payment
+    processing is a flat charge plus a percentage of the *tax-inclusive* total.
+    Each percentage component is rounded up to the cent and then summed — the
+    rounding happens per component, not once on the total.
+
+    ``tax`` is what the buyer was actually charged, when known. Packing slips
+    don't print it, so passing ``state`` instead estimates it from the
+    destination (see domain.STATE_TAX_RATES); the returned ``tax_estimated``
+    flag says which happened, so a reviewer can tell an exact fee from a close
+    one.
+    """
+    commission_pct = float(get_setting(db, "tcg_commission_pct"))
+    processing_pct = float(get_setting(db, "tcg_processing_pct"))
+    processing_flat = float(get_setting(db, "tcg_processing_flat"))
+    taxable = round(subtotal + shipping_charged, 2)
+    estimated = tax is None
+    if estimated:
+        tax = round(taxable * state_tax_rate(state), 2)
+    commission = ceil_cent(commission_pct * taxable)
+    processing = ceil_cent(processing_pct * (taxable + tax))
+    return {
+        "fee": round(commission + processing_flat + processing, 2),
+        "commission": commission,
+        "processing": round(processing + processing_flat, 2),
+        "processing_flat": processing_flat,
+        "tax": round(tax, 2),
+        "tax_estimated": estimated,
+        "tax_rate": state_tax_rate(state) if estimated else None,
+        "fee_base": taxable,
+    }
 
 
 def parse_sale_date(value) -> datetime | None:

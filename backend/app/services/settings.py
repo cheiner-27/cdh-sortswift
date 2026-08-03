@@ -30,6 +30,14 @@ DEFAULTS = {
     "ebay_merchant_location_key": "",    # must exist in Seller Hub (see Open Items)
     "import_undo_window_minutes": 15,
     "default_expense_tax_rate": 0.06,    # tax estimate for expenses lacking an override
+    # TCGplayer fee schedule, used to anticipate the fee on an order before the
+    # payout lands (see services/orders.estimate_marketplace_fee). Commission is
+    # charged on items + shipping charged; processing is charged on the
+    # tax-inclusive total. Commission varies by seller level, so it's a setting
+    # rather than a constant.
+    "tcg_commission_pct": 0.1075,
+    "tcg_processing_pct": 0.025,
+    "tcg_processing_flat": 0.30,
     # Pick-list ordering: ordered list of fields (condition, name, set_code,
     # bin, collector_number, printing). Custom/unmatched lines always sort last.
     "pick_list_sort": ["condition", "name"],

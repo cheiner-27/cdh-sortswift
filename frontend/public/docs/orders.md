@@ -3,8 +3,13 @@
 Orders are sales to fulfill. They arrive three ways:
 
 - **eBay** — via polling (or "Sync orders now" on Marketplaces).
-- **TCGplayer** — via importing a Deduction CSV.
+- **TCGplayer** — by uploading the packing-slip PDF on **Order Intake**, which
+  reads each sheet into an order and estimates the fee. See *Order intake*.
 - **Manual** — an off-platform / in-person sale you record yourself.
+
+> The TCGplayer **Deduction CSV** import is a different job: it adjusts stock for
+> cards sold on *another* channel. It does not create orders, so it books no
+> revenue, cost of goods or fees — use Order Intake for TCGplayer sales.
 
 ## Manual / offline sale
 

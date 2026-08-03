@@ -158,6 +158,49 @@ def default_expense_class(category: str | None) -> str:
 # platforms already used on prior manual orders (see /api/orders/platforms).
 SALE_PLATFORMS = ["eBay", "TCGplayer", "Whatnot"]
 
+# --- Destination sales tax --------------------------------------------------
+#
+# Combined state + average-local sales tax rate per state, used for ONE purpose:
+# the payment-processing slice of a marketplace fee is charged on the
+# tax-inclusive order total, and packing slips don't print the tax.
+#
+# These are deliberately state-level averages, not jurisdiction lookups. Tax
+# reaches the fee only through that percentage term, so the fee's sensitivity to
+# rate error is 0.025 x order value: on a $35 order a full percentage point of
+# rate error moves the fee by $0.009, i.e. you'd have to be off by ~1.15 points
+# to miss by a single cent. Address-level accuracy (a paid tax API) would buy
+# fractions of a cent here, at the cost of a key and a network call in the
+# middle of the pick workflow.
+#
+# Note this is never a liability we owe: on these marketplaces the platform is
+# the facilitator and collects/remits the tax itself. Rates drift by a few
+# tenths a year; edit them here (or override per order in review) when they do.
+STATE_TAX_RATES = {
+    "AL": 0.0929, "AK": 0.0182, "AZ": 0.0838, "AR": 0.0945, "CA": 0.0885,
+    "CO": 0.0781, "CT": 0.0635, "DC": 0.0600, "DE": 0.0000, "FL": 0.0700,
+    "GA": 0.0738, "HI": 0.0450, "IA": 0.0694, "ID": 0.0602, "IL": 0.0886,
+    "IN": 0.0700, "KS": 0.0866, "KY": 0.0600, "LA": 0.1011, "MA": 0.0625,
+    "MD": 0.0600, "ME": 0.0550, "MI": 0.0600, "MN": 0.0804, "MO": 0.0839,
+    "MS": 0.0706, "MT": 0.0000, "NC": 0.0700, "ND": 0.0704, "NE": 0.0697,
+    "NH": 0.0000, "NJ": 0.0660, "NM": 0.0762, "NV": 0.0824, "NY": 0.0853,
+    "OH": 0.0724, "OK": 0.0899, "OR": 0.0000, "PA": 0.0634, "RI": 0.0700,
+    "SC": 0.0750, "SD": 0.0611, "TN": 0.0955, "TX": 0.0820, "UT": 0.0725,
+    "VA": 0.0577, "VT": 0.0636, "WA": 0.0938, "WI": 0.0570, "WV": 0.0657,
+    "WY": 0.0544,
+}
+
+# Rate applied when the destination state is unknown or outside the table (e.g.
+# a territory or an international address). The median US combined rate keeps a
+# missing state from silently understating the fee.
+FALLBACK_TAX_RATE = 0.0700
+
+
+def state_tax_rate(state: str | None) -> float:
+    """Estimated combined sales tax rate for a destination state."""
+    if not state:
+        return FALLBACK_TAX_RATE
+    return STATE_TAX_RATES.get(state.strip().upper(), FALLBACK_TAX_RATE)
+
 
 def normalize_condition(value: str) -> str:
     v = (value or "").strip()
