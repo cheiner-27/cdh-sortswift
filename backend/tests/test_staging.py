@@ -52,22 +52,27 @@ def test_bulk_edit_rejects_non_numeric_cost(db, card):
     assert e.value.status_code == 400
 
 
-def test_bulk_edit_skips_cost_on_bulk_pull_rows(db, card):
-    """A row pulled from a bulk pile takes its cost from the pile at approve
-    time, so a batch-wide cost must not be stamped onto it."""
+def test_bulk_edit_skips_cost_and_date_on_bulk_pull_rows(db, card):
+    """A row pulled from a bulk pile takes its cost AND its acquisition date
+    from the pile at approve time, so neither may be stamped onto it by a
+    batch-wide edit — that would show a date the approve then ignores."""
     pile = bulk_router.create_pile({"name": "Commons", "game": "Magic"}, db)
     product = db.get(CustomProduct, pile["id"])
-    bulk_router.record_purchase(product.id, {"quantity": 100, "total_cost": 50.0}, db)
+    bulk_router.record_purchase(product.id, {"quantity": 100, "total_cost": 50.0,
+                                             "acquired_at": "2026-06-20"}, db)
     pile_item = db.query(InventoryItem).filter_by(
         custom_sku_id=product.skus[0].id).one()
 
     from_pile = _stage(db, card, source_bulk_id=pile_item.id)
     fresh = _stage(db, card, bin="A")
     staging_router.bulk_edit(
-        {"ids": [from_pile.id, fresh.id], "set": {"cost": "2.00", "bin": "A"}}, db)
+        {"ids": [from_pile.id, fresh.id],
+         "set": {"cost": "2.00", "acquired_at": "2026-08-04", "bin": "A"}}, db)
 
     assert from_pile.cost is None and from_pile.bin == "A"  # other fields still apply
+    assert from_pile.acquired_at is None                    # pile's date wins
     assert fresh.cost == 2.00
+    assert fresh.acquired_at.date().isoformat() == "2026-08-04"
     # approving carries the pile's per-card cost ($0.50), not the batch cost
     staging_svc.approve_staging_rows(db, [from_pile])
     pulled = db.query(InventoryItem).filter_by(

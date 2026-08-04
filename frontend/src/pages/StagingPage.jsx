@@ -18,7 +18,9 @@ export default function StagingPage() {
   const [showAdd, setShowAdd] = useState(false)
   const [simResults, setSimResults] = useState(null)
   const [piles, setPiles] = useState([])
-  const pileName = (id) => piles.find((p) => p.id === id)?.name || `#${id}`
+  // source_bulk_id is the pile's INVENTORY id, not its pile id.
+  const pileOf = (id) => piles.find((p) => p.inventory_id === id)
+  const pileName = (id) => pileOf(id)?.name || `#${id}`
 
   const refresh = () =>
     api.get(`/api/staging${source ? `?source=${source}` : ''}`).then(setRows)
@@ -53,7 +55,17 @@ export default function StagingPage() {
     try {
       const res = await api.post('/api/staging/approve',
         all ? {} : { ids: [...selected] })
-      ok(`Approved ${res.approved} row(s) → live inventory`)
+      // Rows whose bulk pile couldn't be pulled from stay staged — say so
+      // rather than reporting a clean run that silently moved nothing.
+      const notes = (res.partial || []).map(
+        (p) => `row ${p.id}: pile only had ${p.moved} of ${p.wanted}`)
+      const reasons = [...new Set((res.skipped || []).map((s) => s.reason))]
+      const summary = `Approved ${res.approved} row(s) → live inventory`
+      if (reasons.length) {
+        err(new Error(`${summary}. Left ${res.skipped.length} staged — ${reasons.join('; ')}`))
+      } else {
+        ok(notes.length ? `${summary} (${notes.join('; ')})` : summary)
+      }
       setSelected(new Set()); refresh()
     } catch (e) { err(e) }
   }
@@ -161,9 +173,12 @@ export default function StagingPage() {
               ? <span className="muted" title="Cost comes from the bulk pile this card is pulled from">(from bulk)</span>
               : <input key={`cost-${r.id}-${r.cost ?? ''}`} style={{ width: 65 }} defaultValue={r.cost ?? ''}
                   onBlur={(e) => patch(r.id, { cost: e.target.value === '' ? null : Number(e.target.value) })} />}</td>
-            <td><input key={`acq-${r.id}-${r.acquired_at ?? ''}`} type="date" style={{ width: 130 }}
-              defaultValue={r.acquired_at ? r.acquired_at.slice(0, 10) : ''}
-              onBlur={(e) => patch(r.id, { acquired_at: e.target.value || null })} title="Original purchase date (drives FIFO age)" /></td>
+            <td>{r.source_bulk_id
+              ? <span className="muted" title="Inherited from the bulk pile this card is pulled from — its purchase date, not today's">
+                  {pileOf(r.source_bulk_id)?.acquired_at?.slice(0, 10) || '(from bulk)'}</span>
+              : <input key={`acq-${r.id}-${r.acquired_at ?? ''}`} type="date" style={{ width: 130 }}
+                  defaultValue={r.acquired_at ? r.acquired_at.slice(0, 10) : ''}
+                  onBlur={(e) => patch(r.id, { acquired_at: e.target.value || null })} title="Original purchase date (drives FIFO age)" />}</td>
             <td style={{ whiteSpace: 'nowrap' }} title="TCGplayer market value (reference)">
               {r.market_value == null ? <span className="muted">—</span>
                 : <span style={{ color: r.market_value >= 2 ? 'var(--green)' : 'var(--muted)' }}>{fmtMoney(r.market_value)}</span>}</td>

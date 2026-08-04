@@ -13,6 +13,7 @@ export default function BulkPage() {
   const [buyPile, setBuyPile] = useState(null)
   const [sellPile, setSellPile] = useState(null)
   const [mixPile, setMixPile] = useState(null)
+  const [datePile, setDatePile] = useState(null)
 
   const refresh = () => api.get('/api/bulk/piles').then(setPiles)
   useEffect(() => { refresh() }, [])
@@ -43,7 +44,7 @@ export default function BulkPage() {
 
       <div className="panel table-wrap"><table>
         <thead><tr>
-          <th>Pile</th><th>Game</th><th>On hand</th><th>Cost basis</th>
+          <th>Pile</th><th>Game</th><th>On hand</th><th>Purchased</th><th>Cost basis</th>
           <th>Avg $/card</th><th>Next $/card (FIFO)</th>
           <th>Est. value</th><th>Sell price</th><th></th>
         </tr></thead>
@@ -53,6 +54,19 @@ export default function BulkPage() {
               {p.description && <div className="muted" style={{ fontSize: 12 }}>{p.description}</div>}</td>
             <td>{p.game}</td>
             <td><b>{p.on_hand.toLocaleString()}</b> cards</td>
+            <td title={p.batch_count > 1
+              ? `${p.batch_count} separate buys — this is the oldest, the date the next cards out carry`
+              : 'Purchase date every card pulled out of this pile inherits'}>
+              {p.acquired_at
+                ? <>{p.acquired_at.slice(0, 10)}
+                  {p.batch_count === 1 &&
+                    <div className="muted" style={{ fontSize: 12 }}>
+                      <a href="#" onClick={(e) => { e.preventDefault(); setDatePile(p) }}>edit</a>
+                    </div>}
+                  {p.batch_count > 1 &&
+                    <div className="muted" style={{ fontSize: 12 }}>+{p.batch_count - 1} more</div>}
+                </>
+                : <span className="muted">—</span>}</td>
             <td>{fmtMoney(p.cost_basis)}</td>
             <td>{p.avg_unit_cost == null ? '—' : `$${p.avg_unit_cost.toFixed(4)}`}</td>
             <td title="Cost of the next cards to sell (oldest batch)">
@@ -88,6 +102,8 @@ export default function BulkPage() {
         onDone={() => { setSellPile(null); refresh() }} />}
       {mixPile && <MixModal pile={mixPile} onClose={() => setMixPile(null)}
         onDone={() => { setMixPile(null); refresh() }} />}
+      {datePile && <DateModal pile={datePile} onClose={() => setDatePile(null)}
+        onDone={() => { setDatePile(null); refresh() }} />}
     </div>
   )
 }
@@ -139,6 +155,37 @@ function MixModal({ pile, onClose, onDone }) {
       </p>
       <div className="row center">
         <button className="primary" disabled={total > 100} onClick={submit}>Save mix</button>
+        <Msg msg={msg} />
+      </div>
+    </Modal>
+  )
+}
+
+// Correct the purchase date on a pile bought without one (it defaults to the
+// day you recorded the buy). Every card pulled out of the pile inherits it, so
+// a wrong date here ages every hit you sift out of it.
+function DateModal({ pile, onClose, onDone }) {
+  const [msg, , err] = useMsg()
+  const [when, setWhen] = useState(pile.acquired_at ? pile.acquired_at.slice(0, 10) : '')
+  const submit = async () => {
+    try {
+      await api.patch(`/api/bulk/piles/${pile.id}`, { acquired_at: when })
+      onDone()
+    } catch (e) { err(e) }
+  }
+  return (
+    <Modal title={`Purchase date — ${pile.name}`} onClose={onClose}>
+      <p className="muted" style={{ marginTop: 0, maxWidth: 560 }}>
+        When you bought this bulk. Cards you pull out of the pile during scanning
+        inherit this date as their acquisition date, so it drives their
+        inventory age — not the day you sifted them out.
+      </p>
+      <div className="row">
+        <Field label="Purchased"><input type="date" style={{ width: 140 }} autoFocus
+          value={when} onChange={(e) => setWhen(e.target.value)} /></Field>
+      </div>
+      <div className="row center">
+        <button className="primary" disabled={!when} onClick={submit}>Save date</button>
         <Msg msg={msg} />
       </div>
     </Modal>
@@ -214,6 +261,7 @@ function BuyModal({ pile, onClose, onDone }) {
         <Field label="Sell price (optional)"><input style={{ width: 90 }} value={f.price}
           onChange={(e) => setF({ ...f, price: e.target.value })} /></Field>
         <Field label="Acquired date"><input type="date" style={{ width: 140 }} value={f.acquired_at}
+          title="The day you bought this bulk (blank = today). Cards you later pull out of the pile inherit it as their acquisition date, so it sets their inventory age."
           onChange={(e) => setF({ ...f, acquired_at: e.target.value })} /></Field>
       </div>
       {perCard != null && qty > 0 &&

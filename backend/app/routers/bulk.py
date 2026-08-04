@@ -48,11 +48,36 @@ def _pile_item(db: Session, sku: CustomSku, *,
     return db.execute(q).scalars().first()
 
 
+def _set_pile_acquired_at(db: Session, product: CustomProduct, value) -> None:
+    """Retro-set the purchase date on a single-buy pile's FIFO batch."""
+    sku = _pile_sku(product)
+    batches = db.execute(select(AcquisitionLog).where(
+        AcquisitionLog.custom_sku_id == sku.id,
+        AcquisitionLog.quantity_remaining > 0,
+    )).scalars().all() if sku else []
+    if not batches:
+        raise HTTPException(400, "pile has no purchase to date — record a buy first")
+    if len(batches) > 1:
+        raise HTTPException(
+            400, f"'{product.name}' holds {len(batches)} separate buys, each with "
+            "its own date — correct them from the purchase that was wrong")
+    try:
+        when = order_svc.parse_sale_date(value)
+    except ValueError:                    # malformed; blank comes back as None
+        when = None
+    if when is None:
+        raise HTTPException(
+            400, f"could not read acquired date '{value}' — use YYYY-MM-DD")
+    batches[0].acquired_at = when
+
+
 def pile_dict(db: Session, product: CustomProduct, *, rates: dict | None = None) -> dict:
     sku = _pile_sku(product)
     item = _pile_item(db, sku) if sku else None
     cost_basis = 0.0
     next_unit_cost = None
+    acquired_at = None
+    batch_count = 0
     if rates is None:
         rates = get_setting(db, "bulk_rates") or {}
     unit_value = pricing.bulk_unit_value(rates, product.category, product.composition)
@@ -62,8 +87,13 @@ def pile_dict(db: Session, product: CustomProduct, *, rates: dict | None = None)
             AcquisitionLog.quantity_remaining > 0,
         )).scalars().all()
         cost_basis = sum(b.quantity_remaining * b.unit_cost for b in batches)
+        batch_count = len(batches)
         if item is not None:
             next_unit_cost = inv_svc.fifo_unit_cost(db, item)
+            # The purchase date the next cards out of this pile carry with them:
+            # the oldest unexhausted batch, i.e. the one FIFO spends next. This
+            # is what a card pulled into tracked inventory inherits.
+            acquired_at = inv_svc.oldest_acquisition_date(db, item)
     return {
         "id": product.id,
         "name": product.name,
@@ -78,6 +108,10 @@ def pile_dict(db: Session, product: CustomProduct, *, rates: dict | None = None)
                           if item and item.quantity else None),
         "next_unit_cost": round(next_unit_cost, 4) if next_unit_cost is not None else None,
         "current_price": item.current_price if item else None,
+        # Purchase date carried onto cards pulled out of this pile, and whether
+        # it is editable (only unambiguous while the pile holds a single buy).
+        "acquired_at": acquired_at.isoformat() if acquired_at else None,
+        "batch_count": batch_count,
         # Grade mix and what it makes the pile worth. unit_value is None until
         # a mix is set, which the UI shows as "set mix" rather than $0.00.
         "composition": product.composition or {},
@@ -111,6 +145,12 @@ def update_pile(product_id: int, payload: dict = Body(...),
     ``composition`` is percentages keyed by the game's bulk grades. They may
     total less than 100 — the remainder is simply valued at nothing — but not
     more, which is always a typo rather than a pile that is 130% of itself.
+
+    ``acquired_at`` corrects the pile's purchase date — the date every card
+    pulled out of it inherits, and which defaults to *today* when a buy is
+    recorded without one. Only accepted while the pile holds a single
+    unexhausted buy: with several, "the pile's purchase date" is ambiguous
+    (each batch has its own) and rewriting them all would flatten FIFO order.
     """
     product = db.get(CustomProduct, product_id)
     if not product or product.item_type != "bulk":
@@ -118,6 +158,8 @@ def update_pile(product_id: int, payload: dict = Body(...),
     for f in ("name", "group", "description"):
         if f in payload:
             setattr(product, f, payload[f])
+    if "acquired_at" in payload:
+        _set_pile_acquired_at(db, product, payload["acquired_at"])
     if "composition" in payload:
         raw = mapping(payload["composition"], "composition")
         valid = {k for k, _label, _rate in bulk_grades_for(product.category)}

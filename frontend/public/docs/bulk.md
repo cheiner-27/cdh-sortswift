@@ -16,6 +16,16 @@ recorded as a **FIFO cost batch** — so if you buy 500 @ $0.05 and later 1,000 
 $0.06, the first 500 cards that leave the pile cost $0.05 each and the next 1,000
 cost $0.06. You never have to average anything.
 
+Set the **Acquired date** to the day you actually bought the bulk. Leave it blank
+and it defaults to today, which is rarely what you mean for a pile you've had for
+months. It matters beyond bookkeeping: every card you later pull out of the pile
+inherits this date as its acquisition date, so it drives the card's inventory age.
+
+The pile's **Purchased** column shows that date. On a pile with one buy you can
+**edit** it there to correct a date entered wrong (or defaulted to today). A pile
+with several buys shows the oldest and a `+n more` note — each buy carries its own
+date, so there's no single date to edit; fix the buy that was wrong.
+
 ### 2. Pull the good cards out (during scanning)
 When you sift a pile for hits, go to the **Scan** page and set **Pull from bulk
 lot** to that pile before pulling scans (or set it per-card / in bulk from the
@@ -25,8 +35,17 @@ carrying its share of the pile's per-card cost and the pile's acquisition date.
 No fresh cost is invented and nothing is double-counted — the money was already
 spent when you bought the bulk.
 
-Staging rows headed for a pile show a **⟵ from &lt;pile&gt;** badge, and their cost
-column reads *(from bulk)* because the cost comes from the pile, not the row.
+Only piles with cards on hand are offered as a source — an empty pile has nothing
+to pull out of. The count and purchase date next to each pile's name in the picker
+are what a card pulled from it will carry.
+
+Staging rows headed for a pile show a **⟵ from &lt;pile&gt;** badge, their cost
+column reads *(from bulk)*, and their **Acquired** column shows the pile's
+purchase date rather than an empty box — both come from the pile, not the row.
+
+If a pile can't be pulled from when you approve (it emptied out in the meantime,
+or the pile was deleted), those rows **stay in staging** and Staging tells you
+why. They're never consumed by an approve that moved nothing.
 
 ### 3. Sell it in chunks
 **Sell** from a pile records a manual/offline sale by card count + price (e.g.

@@ -98,11 +98,12 @@ def bulk_edit(payload: dict = Body(...), db: Session = Depends(get_db)):
                   "quantity", "price"):
             if f in changes:
                 setattr(row, f, _clean(f, changes[f]))
-        # Cost on a bulk-pull row is ignored at approve time (the cost comes
-        # from the pile it's pulled out of), so don't pretend to set it.
+        # Cost AND acquired date on a bulk-pull row are ignored at approve time
+        # (both come from the pile it's pulled out of), so don't pretend to set
+        # them.
         if "cost" in changes and not row.source_bulk_id:
             row.cost = _clean("cost", changes["cost"])
-        if "acquired_at" in changes:
+        if "acquired_at" in changes and not row.source_bulk_id:
             row.acquired_at = _parse_date(changes["acquired_at"])
     db.commit()
     return {"updated": len(rows), "rows": [_staging_dict(db, r) for r in rows]}
@@ -110,15 +111,18 @@ def bulk_edit(payload: dict = Body(...), db: Session = Depends(get_db)):
 
 @router.post("/approve")
 def approve(payload: dict = Body(...), db: Session = Depends(get_db)):
-    """Approve some or all staged rows (partial approval supported)."""
+    """Approve some or all staged rows (partial approval supported).
+
+    Rows naming an unusable bulk pile come back under ``skipped`` and stay in
+    staging, so a bad source never silently discards the card.
+    """
     ids = payload.get("ids")
     if ids:
         rows = db.execute(select(StagingItem).where(
             StagingItem.id.in_(ids))).scalars().all()
     else:
         rows = db.execute(select(StagingItem)).scalars().all()
-    n = staging_svc.approve_staging_rows(db, rows)
-    return {"approved": n}
+    return staging_svc.approve_staging_rows(db, rows)
 
 
 @router.post("/reject")
@@ -163,7 +167,10 @@ def manual_add(payload: dict = Body(...), db: Session = Depends(get_db)):
     if not fields["catalog_card_id"] and not fields["custom_sku_id"]:
         raise HTTPException(400, "catalog_card_id or custom_sku_id required")
     if payload.get("direct"):
-        inv_id = staging_svc.add_direct(db, **fields)
+        try:
+            inv_id = staging_svc.add_direct(db, **fields)
+        except ValueError as e:                       # unusable source bulk pile
+            raise HTTPException(400, str(e))
         return {"inventory_id": inv_id, "direct": True}
     row = StagingItem(source="manual", **fields)
     db.add(row)
@@ -187,7 +194,10 @@ def bulk_add(payload: dict = Body(...), db: Session = Depends(get_db)):
             continue
         fields = _row_fields(r)
         if direct:
-            staging_svc.add_direct(db, **fields)
+            try:
+                staging_svc.add_direct(db, **fields)
+            except ValueError as e:                   # unusable source bulk pile
+                raise HTTPException(400, str(e))
         else:
             db.add(StagingItem(source="manual", **fields))
         n += 1

@@ -34,11 +34,18 @@ hit Apply again. **Clear form** empties it.
 ## Cards pulled from a bulk pile
 
 A row tagged **⟵ from *pile*** came out of a bulk pile. On approve it is *pulled
-out* of that pile — decrementing it and carrying its per-card cost and
-acquisition age across — instead of being counted as a fresh purchase.
+out* of that pile — decrementing it and carrying its per-card cost and purchase
+date across — instead of being counted as a fresh purchase.
 
-Those rows show `(from bulk)` instead of a cost box, and a batch-wide cost from
-the bulk bar skips them on purpose. Every other field still applies.
+Those rows show `(from bulk)` instead of a cost box, and the pile's purchase date
+instead of an **Acquired** box: the card inherits the day you bought the bulk, not
+the day you sifted it out. A batch-wide cost *or* date from the bulk bar skips
+these rows on purpose, since the approve would ignore it either way. Every other
+field still applies.
+
+A row whose pile can't be pulled from — emptied out since you staged it, or
+deleted — is **left in staging** with the reason, not approved. Fix the pile (or
+clear the source to book it as fresh stock) and approve again.
 
 ## Approving
 

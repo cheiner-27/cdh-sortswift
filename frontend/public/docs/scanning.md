@@ -44,6 +44,14 @@ There is **no "session printing"** — printing (foil / holo / 1st edition /
 reverse holo) is a property of the individual card, and any batch mixes them, so
 you set printing per card during review.
 
+**Pull from bulk lot** is the other session default, and it changes what intake
+*means*: cards from that session are pulled OUT of the pile rather than bought
+fresh, carrying the pile's per-card cost and purchase date. The **Source** column
+in the review queue sets it per card. Only piles with cards on hand are listed —
+each shows its count and purchase date, which is what the card will inherit. When
+a pile is set, the session unit cost greys out, because the cost comes from the
+pile. See [Bulk](/docs/bulk.md).
+
 ## How recognition works
 
 1. **OCR** reads the set code + collector number from game-specific regions of
