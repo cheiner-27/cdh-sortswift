@@ -76,6 +76,12 @@ def edit_order(slip_id: int, payload: dict = Body(...),
                                       "shipping_charged", default=0.0)
     if "tax" in payload:
         slip.tax = money(payload["tax"], "tax", default=None)
+    if "estimated_fee" in payload:
+        # Blank restores the estimate; a number pins what the reviewer typed.
+        fee = money(payload["estimated_fee"], "estimated_fee", default=None)
+        slip.fee_overridden = fee is not None
+        if fee is not None:
+            slip.estimated_fee = fee
     if "quantity_total" in payload:
         slip.quantity_total = whole(payload["quantity_total"], "quantity_total",
                                     default=slip.quantity_total)
@@ -95,9 +101,9 @@ def edit_order(slip_id: int, payload: dict = Body(...),
 @router.post("/orders/{slip_id}/lines/{index}/resolve")
 def resolve_line(slip_id: int, index: int, payload: dict = Body(default={}),
                  db: Session = Depends(get_db)):
-    """Match one line by hand: pick an inventory record, a catalog card, or skip.
+    """Match one line by hand: pick an inventory record, or skip it.
 
-    Body: ``{inventory_id}`` | ``{catalog_card_id}`` | ``{skip: true}``.
+    Body: ``{inventory_id}`` | ``{skip: true}``.
     """
     slip = _slip(db, slip_id)
     if slip.status in ("committed", "duplicate"):
@@ -106,16 +112,12 @@ def resolve_line(slip_id: int, index: int, payload: dict = Body(default={}),
         if payload.get("skip"):
             intake_svc.skip_line(db, slip, index)
         else:
-            inv = payload.get("inventory_id")
-            card = payload.get("catalog_card_id")
-            if inv is None and card is None:
-                raise ValueError("inventory_id, catalog_card_id or skip required")
+            if payload.get("inventory_id") is None:
+                raise ValueError("inventory_id or skip required")
             intake_svc.resolve_line(
                 db, slip, index,
-                inventory_id=whole(inv, "inventory_id", default=None, min_value=1,
-                                   max_value=None),
-                catalog_card_id=whole(card, "catalog_card_id", default=None,
-                                      min_value=1, max_value=None))
+                inventory_id=whole(payload["inventory_id"], "inventory_id",
+                                   min_value=1, max_value=None))
     except ValueError as e:
         raise HTTPException(400, str(e))
     return slip_order_dict(slip)

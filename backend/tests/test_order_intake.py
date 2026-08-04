@@ -12,7 +12,7 @@ from app.models import (CatalogCard, InventoryItem, Order, SlipOrder,
 from app.services import order_intake as intake
 from app.services import orders as order_svc
 from app.services import pdf_slips
-from app.services.inventory import add_stock
+from app.services.inventory import add_stock, item_description
 
 DATA = Path(__file__).parent / "data"
 SAMPLE = DATA / "packing_slips_sample.pdf"   # 3 single-page orders
@@ -336,12 +336,15 @@ def test_condition_must_match_the_condition_sold(db):
                 if s.order_number == "5BABB616-5A5A6F-972D0")
     assert slip.lines[0]["condition"] == "NM"
     assert slip.lines[0]["match_status"] == "unmatched"
-    assert "no NM/normal inventory record" in slip.lines[0]["match_note"]
+    # The LP copy is surfaced: selling NM while holding only LP usually means
+    # the card was graded wrong on intake, which is worth pointing at.
+    assert "you have this card as LP/normal" in slip.lines[0]["match_note"]
+    assert len(slip.lines[0]["candidates"]) == 1
 
 
-def test_zero_quantity_record_is_offered_as_a_candidate(db):
-    """Out of stock is different from unknown: the record exists, so surface it
-    rather than making the reviewer search for it."""
+def test_zero_quantity_record_gets_its_own_state(db):
+    """Out of stock is different from unknown: the right record exists and holds
+    nothing, which means the stock record is what's wrong, not the slip."""
     card = make_card(db, name="Shifting Woodland", set_name="Modern Horizons 3",
                      number="228")
     item = stock(db, card, qty=1, cost=1.0)
@@ -351,9 +354,10 @@ def test_zero_quantity_record_is_offered_as_a_candidate(db):
     slip = next(s for s in batch.orders
                 if s.order_number == "5BABB616-5A5A6F-972D0")
     line = slip.lines[0]
-    assert line["match_status"] == "unmatched"
-    assert "no NM/normal stock on hand" in line["match_note"]
+    assert line["match_status"] == "out_of_stock"
+    assert "holds 0" in line["match_note"]
     assert [c["inventory_id"] for c in line["candidates"]] == [item.id]
+    assert slip.status == "blocked"          # must be decided, never auto-committed
 
 
 def test_short_stock_still_matches_but_flags_the_shortfall(db):
@@ -422,6 +426,107 @@ def test_deleting_a_batch_leaves_committed_orders_alone(db):
     db.commit()
     assert db.query(SlipOrder).count() == 0
     assert db.query(Order).count() == 1
+
+
+def test_matches_despite_a_different_set_name(db):
+    """TCGplayer's set naming diverges from the catalog's constantly ("Commander:
+    Innistrad: Crimson Vow" vs "Crimson Vow Commander"), so set name must not be
+    part of the key. Collector number plus the card name carries the match."""
+    card = make_card(db, name="Darksteel Mutation",
+                     set_name="Crimson Vow Commander", number="84")
+    item = stock(db, card, qty=1, cost=1.0)
+    line = next(l for l in slips(MULTI)["5BABB616-70249F-12585"]["lines"]
+                if l["card_name"] == "Darksteel Mutation")
+    assert line["set_name"] == "Commander: Innistrad: Crimson Vow"   # differs
+    matched = intake.match_line(db, line)
+    assert matched["match_status"] == "matched"
+    assert matched["inventory_id"] == item.id
+
+
+def test_matches_through_a_treatment_suffix_on_the_name(db):
+    """TCGplayer appends "(Extended Art)"; the catalog doesn't carry it."""
+    card = make_card(db, name="Cauldron of Essence",
+                     set_name="Secrets of Strixhaven", number="347")
+    item = stock(db, card, qty=2, cost=1.0, printing="foil")
+    line = next(l for l in slips(MULTI)["5BABB616-1B553A-89210"]["lines"]
+                if l["card_name"].startswith("Cauldron"))
+    assert line["card_name"] == "Cauldron of Essence (Extended Art)"
+    assert intake.match_line(db, line)["inventory_id"] == item.id
+
+
+def test_a_different_card_at_the_same_number_is_not_matched(db):
+    """The looser key is only safe because it stays inside your own stock — it
+    still must not match a different card that shares a collector number."""
+    card = make_card(db, name="Completely Different Card",
+                     set_name="Modern Horizons 3", number="228")
+    stock(db, card, qty=3, cost=1.0)
+    other = make_card(db, name="Shifting Woodland",
+                      set_name="Modern Horizons 3", number="228")
+    keep = stock(db, other, qty=1, cost=1.0)
+    line = slips(MULTI)["5BABB616-5A5A6F-972D0"]["lines"][0]
+    assert intake.match_line(db, line)["inventory_id"] == keep.id
+
+
+def test_matching_never_reaches_for_a_card_you_do_not_stock(db):
+    """A catalog hit with no inventory behind it is not an answer — it would
+    defeat the point of checking the slip against what's on the shelf."""
+    make_card(db, name="Shifting Woodland", set_name="Modern Horizons 3",
+              number="228")   # in the catalog, never stocked
+    line = slips(MULTI)["5BABB616-5A5A6F-972D0"]["lines"][0]
+    matched = intake.match_line(db, line)
+    assert matched["match_status"] == "unmatched"
+    assert matched["inventory_id"] is None
+    assert matched["catalog_card_id"] is None
+
+
+def test_buyer_name_is_kept_for_review_but_never_on_the_order(db):
+    card = make_card(db, name="Shifting Woodland", set_name="Modern Horizons 3",
+                     number="228")
+    stock(db, card, qty=2, cost=1.0)
+    batch = intake.build_batch(db, filename="m.pdf", content=MULTI.read_bytes())
+    slip = next(s for s in batch.orders
+                if s.order_number == "5BABB616-5A5A6F-972D0")
+    assert slip.buyer_name == "Ridge Froehlich"      # visible while reviewing
+    order = intake.commit_order(db, slip)
+    assert order.buyer_name == ""
+    assert "name" not in order.ship_to
+    assert order.ship_to["state"] == "FL"            # destination still kept
+
+
+def test_committed_line_is_described_like_a_manual_sale(db):
+    """Same card, same wording, whichever path recorded the sale."""
+    card = make_card(db, name="Shifting Woodland", set_name="Modern Horizons 3",
+                     number="228", set_code="MH3")
+    item = stock(db, card, qty=2, cost=1.0)
+    batch = intake.build_batch(db, filename="m.pdf", content=MULTI.read_bytes())
+    slip = next(s for s in batch.orders
+                if s.order_number == "5BABB616-5A5A6F-972D0")
+    order = intake.commit_order(db, slip)
+    assert order.items[0].description == item_description(item)
+    assert order.items[0].description == "Shifting Woodland [MH3 228] NM normal"
+
+
+def test_shipping_charged_is_prefilled_for_small_orders(db):
+    batch = intake.build_batch(db, filename="m.pdf", content=MULTI.read_bytes())
+    small = next(s for s in batch.orders if s.item_total == 4.95)
+    big = next(s for s in batch.orders if s.item_total == 28.64)
+    assert small.shipping_charged == 1.49
+    assert big.shipping_charged == 0.0
+    # and it lands in the commission base
+    assert small.fee_detail["fee_base"] == 6.44
+
+
+def test_a_typed_fee_survives_recalculation(db):
+    batch = intake.build_batch(db, filename="s.pdf", content=SAMPLE.read_bytes())
+    slip = batch.orders[0]
+    estimated = slip.estimated_fee
+    slip.estimated_fee = 9.99
+    slip.fee_overridden = True
+    intake.refresh(db, slip)                 # would otherwise overwrite it
+    assert slip.estimated_fee == 9.99
+    slip.fee_overridden = False
+    intake.refresh(db, slip)
+    assert slip.estimated_fee == estimated   # cleared -> estimate returns
 
 
 def test_same_sale_under_a_foreign_id_warns_without_blocking(db):
@@ -495,12 +600,14 @@ def test_api_upload_review_and_commit(client):
     # No stock for the seeded card yet, so it's held back rather than committed.
     assert slip["status"] == "blocked"
     assert slip["lines"][0]["match_status"] == "unmatched"
-    assert slip["lines"][0]["catalog_card_id"]        # card known, stock isn't
+    assert slip["lines"][0]["inventory_id"] is None
     assert slip["fee_detail"]["tax_estimated"] is True
 
-    # Pin the tax -> the fee stops being an estimate.
-    r = client.patch(f"/api/order-intake/orders/{slip['id']}", json={"tax": 0.35})
-    assert r.status_code == 200 and r.json()["fee_detail"]["tax_estimated"] is False
+    # The fee can be corrected directly, without touching tax.
+    r = client.patch(f"/api/order-intake/orders/{slip['id']}",
+                     json={"estimated_fee": 1.11})
+    assert r.status_code == 200
+    assert r.json()["estimated_fee"] == 1.11 and r.json()["fee_overridden"] is True
 
     # Skipping the only line unblocks the order.
     r = client.post(

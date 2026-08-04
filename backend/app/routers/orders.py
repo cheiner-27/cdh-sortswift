@@ -156,7 +156,7 @@ def delete_order(order_id: int, db: Session = Depends(get_db)):
 @router.post("/manual")
 def manual_order(payload: dict = Body(...), db: Session = Depends(get_db)):
     order = order_svc.create_manual_order(
-        db, buyer_name=payload.get("buyer_name", "walk-in"),
+        db, platform=payload.get("platform") or payload.get("buyer_name") or "manual",
         items=_clean_items(payload.get("items", [])),
         total=money(payload.get("total"), "total", default=None),
         shipping_cost=money(payload.get("shipping_cost"), "shipping_cost", default=0.0),

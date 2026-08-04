@@ -1,11 +1,14 @@
 import React, { useEffect, useRef, useState } from 'react'
 import { api, fmtMoney } from '../api.js'
-import { CardSearch, Field, Modal, Msg, useMsg } from '../components.jsx'
+import { Field, Modal, Msg, useMsg } from '../components.jsx'
 
 const STATUS_BADGE = {
   ready: 'green', blocked: 'yellow', committed: 'blue', duplicate: '',
 }
-const MATCH_BADGE = { matched: 'green', ambiguous: 'yellow', unmatched: 'red' }
+const MATCH_BADGE = {
+  matched: 'green', ambiguous: 'yellow', out_of_stock: 'yellow', unmatched: 'red',
+}
+const MATCH_LABEL = { out_of_stock: 'out of stock' }
 
 const fmtDate = (iso) => (iso ? iso.slice(0, 10) : '—')
 
@@ -255,7 +258,8 @@ function SlipCard({ slip, onPatch, onCommit, onRematch, onSkip, onResolve }) {
                 <td className="muted">{l.set_name}</td>
                 <td>
                   <span className={`badge ${MATCH_BADGE[l.match_status] || ''}`}>
-                    {l.skipped ? 'skipped' : l.match_status}
+                    {l.skipped ? 'skipped'
+                      : (MATCH_LABEL[l.match_status] || l.match_status)}
                   </span>
                   {l.match_note &&
                     <div className="muted" style={{ fontSize: 11 }}>{l.match_note}</div>}
@@ -278,27 +282,25 @@ function SlipCard({ slip, onPatch, onCommit, onRematch, onSkip, onResolve }) {
       </div>
 
       <div className="row center" style={{ marginTop: 10 }}>
-        <Field label="Shipping charged">
+        <Field label="Buyer shipping paid">
           <input type="number" step="0.01" style={{ width: 90 }} disabled={locked}
+            key={`ship-${slip.id}-${slip.shipping_charged}`}
             defaultValue={slip.shipping_charged || ''}
+            title="Not printed on the slip — pre-filled from your flat rate. Counts as revenue and as part of the commission base."
             onBlur={(e) => onPatch({ shipping_charged: e.target.value || 0 })} />
         </Field>
-        <Field label={`Tax ${fee.tax_estimated ? '(estimated)' : '(actual)'}`}>
+        <Field label={`Fee${slip.fee_overridden ? '' : ' (estimated)'}`}>
           <input type="number" step="0.01" style={{ width: 90 }} disabled={locked}
-            placeholder={fee.tax_estimated ? String(fee.tax ?? '') : ''}
-            defaultValue={slip.tax ?? ''}
-            title="Leave blank to estimate from the buyer's state; enter the real figure to make the fee exact"
-            onBlur={(e) => onPatch({ tax: e.target.value === '' ? null : e.target.value })} />
+            key={`fee-${slip.id}-${slip.estimated_fee}`}
+            defaultValue={slip.estimated_fee ?? ''}
+            title="Estimated from the order; type over it to set the real figure, or clear it to go back to the estimate."
+            onBlur={(e) => onPatch({
+              estimated_fee: e.target.value === '' ? null : e.target.value,
+            })} />
         </Field>
         <div className="stat" style={{ minWidth: 110 }}>
           <div className="value">{fmtMoney(slip.item_total)}</div>
           <div className="label">items ({slip.quantity_total})</div>
-        </div>
-        <div className="stat" style={{ minWidth: 110 }}>
-          <div className="value">{fmtMoney(slip.estimated_fee)}</div>
-          <div className="label">
-            est. fee{fee.tax_estimated ? '*' : ''}
-          </div>
         </div>
         <div className="stat" style={{ minWidth: 110 }}>
           <div className="value">
@@ -307,11 +309,18 @@ function SlipCard({ slip, onPatch, onCommit, onRematch, onSkip, onResolve }) {
           </div>
           <div className="label">net before COGS</div>
         </div>
-        <div className="muted" style={{ fontSize: 11, maxWidth: 260 }}>
-          {fmtMoney(fee.commission)} commission + {fmtMoney(fee.processing)} processing
-          {fee.tax_estimated && fee.tax_rate != null && (
-            <> · *tax estimated at {(fee.tax_rate * 100).toFixed(2)}% for{' '}
-              {slip.ship_state || 'unknown state'} ({fmtMoney(fee.tax)})</>
+        <div className="muted" style={{ fontSize: 11, maxWidth: 300 }}>
+          {slip.fee_overridden ? (
+            <>fee set by hand — <button className="small" disabled={locked}
+              onClick={() => onPatch({ estimated_fee: null })}>use the estimate
+              ({fmtMoney(fee.fee)})</button></>
+          ) : (
+            <>{fmtMoney(fee.commission)} commission + {fmtMoney(fee.processing)}{' '}
+              processing
+              {fee.tax_estimated && fee.tax_rate != null && (
+                <> · tax estimated at {(fee.tax_rate * 100).toFixed(2)}% for{' '}
+                  {slip.ship_state || 'unknown state'} ({fmtMoney(fee.tax)})</>
+              )}</>
           )}
         </div>
       </div>
@@ -321,39 +330,56 @@ function SlipCard({ slip, onPatch, onCommit, onRematch, onSkip, onResolve }) {
 
 const round2 = (v) => Math.round(v * 100) / 100
 
+// Resolution searches your inventory, never the catalog: the question is which
+// of your cards this line is, and a catalog card you don't stock isn't an answer.
 function ResolveModal({ slip, index, onClose, onPick }) {
+  const [msg, ok, err] = useMsg()
   const line = (slip.lines || [])[index] || {}
   const candidates = line.candidates || []
+  const [q, setQ] = useState(line.card_name || '')
+  const [found, setFound] = useState(null)
+  const [inStockOnly, setInStockOnly] = useState(true)
+
+  const search = async () => {
+    if (!q.trim()) return
+    try {
+      const r = await api.post('/api/inventory/search',
+        { q: q.trim(), in_stock_only: inStockOnly, limit: 40 })
+      setFound(r.items)
+    } catch (e) { err(e) }
+  }
+  const label = (it) => it.card
+    ? `${it.card.name} [${it.card.set_code} #${it.card.collector_number}] ${it.condition} ${it.printing}`
+    : `${it.custom_name || 'item'} #${it.id}`
+
+  const Row = ({ id, text, note }) => (
+    <tr>
+      <td>{text}</td>
+      <td className="muted">{note}</td>
+      <td><button className="small primary"
+        onClick={() => onPick({ inventory_id: id })}>Use this</button></td>
+    </tr>
+  )
+
   return (
     <Modal wide title={`Match: ${lineLabel(line)}`} onClose={onClose}>
       <div className="muted" style={{ fontSize: 12 }}>
         Sold as {line.condition || line.condition_label}
         {line.printing_canonical && line.printing_canonical !== 'normal'
-          ? ` ${line.printing_canonical}` : ''} from {line.set_name || '—'}.
+          ? ` ${line.printing_canonical}` : ''}, listed under {line.set_name || '—'}.
         {line.match_note ? ` ${line.match_note}.` : ''}
       </div>
+      <Msg msg={msg} />
 
       {candidates.length > 0 && (
         <>
-          <h4>Suggested</h4>
+          <h4>In your inventory</h4>
           <div className="table-wrap">
             <table>
               <tbody>
-                {candidates.map((c, i) => (
-                  <tr key={i}>
-                    <td>{c.label}</td>
-                    <td className="muted">
-                      {c.bin ? `bin ${c.bin}` : ''}{' '}
-                      {c.quantity != null ? `qty ${c.quantity}` : ''}
-                    </td>
-                    <td>
-                      <button className="small primary" onClick={() => onPick(
-                        c.inventory_id ? { inventory_id: c.inventory_id }
-                          : { catalog_card_id: c.catalog_card_id })}>
-                        Use this
-                      </button>
-                    </td>
-                  </tr>
+                {candidates.map((c) => (
+                  <Row key={c.inventory_id} id={c.inventory_id} text={c.label}
+                    note={`${c.bin ? `bin ${c.bin} · ` : ''}qty ${c.quantity}`} />
                 ))}
               </tbody>
             </table>
@@ -361,12 +387,37 @@ function ResolveModal({ slip, index, onClose, onPick }) {
         </>
       )}
 
-      <h4>Search the catalog</h4>
-      <p className="muted" style={{ fontSize: 12, marginTop: 0 }}>
-        Picking a card here re-runs the inventory match against it.
-      </p>
-      <CardSearch selectLabel="Use this"
-        onSelect={(c) => onPick({ catalog_card_id: c.id })} />
+      <h4>Search your inventory</h4>
+      <div className="row center">
+        <input style={{ width: 260 }} value={q} autoFocus
+          placeholder="card name or comment"
+          onChange={(e) => setQ(e.target.value)}
+          onKeyDown={(e) => e.key === 'Enter' && search()} />
+        <label className="muted" style={{ fontSize: 12 }}>
+          <input type="checkbox" checked={inStockOnly}
+            onChange={(e) => setInStockOnly(e.target.checked)} /> in stock only
+        </label>
+        <button onClick={search}>Search</button>
+      </div>
+      {found && (found.length ? (
+        <div className="table-wrap" style={{ maxHeight: 300, overflowY: 'auto' }}>
+          <table>
+            <tbody>
+              {found.map((it) => (
+                <Row key={it.id} id={it.id} text={label(it)}
+                  note={`${it.bin ? `bin ${it.bin} · ` : ''}qty ${it.quantity}`} />
+              ))}
+            </tbody>
+          </table>
+        </div>
+      ) : (
+        <p className="muted" style={{ fontSize: 12 }}>
+          Nothing in inventory matches that
+          {inStockOnly ? ' and is in stock' : ''}. If the card really was sold,
+          the stock record is what needs fixing — add it, then Re-match. Or Skip
+          the line to record the sale without linking inventory.
+        </p>
+      ))}
 
       <div className="row" style={{ marginTop: 12 }}>
         <button onClick={() => onPick({ skip: true })}

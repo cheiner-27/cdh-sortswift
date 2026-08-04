@@ -14,7 +14,7 @@ of the batch free to go through.
 import logging
 from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import func, select
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from ..domain import normalize_condition, normalize_printing
@@ -23,6 +23,7 @@ from ..models import (CatalogCard, InventoryItem, Order, OrderItem, SlipBatch,
 from . import orders as order_svc
 from . import pdf_slips
 from .inventory import item_description
+from .settings import get_setting
 
 log = logging.getLogger(__name__)
 
@@ -36,6 +37,12 @@ GAME_LABELS = {
 MATCHED = "matched"
 UNMATCHED = "unmatched"
 AMBIGUOUS = "ambiguous"
+OUT_OF_STOCK = "out_of_stock"
+
+# How much of the card name has to agree. TCGplayer appends treatment suffixes
+# the catalog doesn't carry ("Cauldron of Essence (Extended Art)" vs "Cauldron of
+# Essence"), so the comparison is a shared prefix rather than an equality test.
+NAME_PREFIX = 10
 
 
 def _game_code(label: str | None) -> str | None:
@@ -48,55 +55,72 @@ def _candidate(item: InventoryItem) -> dict:
             "quantity": item.quantity}
 
 
-def _find_card(db: Session, line: dict) -> tuple[CatalogCard | None, list[CatalogCard]]:
-    """Resolve a slip line to a catalog card.
+def _name_agrees(line_key: str, card_key: str | None) -> bool:
+    """Do two name keys refer to the same card? Either side may carry extra
+    text, so a shared prefix counts on whichever is shorter."""
+    card_key = card_key or ""
+    if not line_key or not card_key:
+        return False
+    n = min(len(line_key), len(card_key), NAME_PREFIX)
+    return line_key[:n] == card_key[:n]
 
-    The slip prints set *name*, collector number, and card name — no set code and
-    no product id — so matching keys on (game, set name, collector number), which
-    is unique in practice, and falls back to (game, name) when a set name has
-    drifted between TCGplayer and our catalog source.
+
+def find_stock(db: Session, line: dict, *, any_variant: bool = False) -> list[InventoryItem]:
+    """Inventory records that could be the card on this slip line.
+
+    Matching runs against *inventory*, not the catalog. That is the point: a
+    packing slip is a list of cards you are about to pull off a shelf, so a hit
+    against something you don't own tells you nothing, and a miss is exactly the
+    signal worth having — it means the stock was never entered, or was entered
+    wrong.
+
+    The key is the collector number plus a name prefix. Set name is deliberately
+    *not* used: TCGplayer's set naming diverges from the catalog's often enough
+    to be useless as a key ("Commander: Innistrad: Crimson Vow" against "Crimson
+    Vow Commander", "The List Reprints" against the original set). Scoping to
+    inventory is what makes the looser key safe — a collector number collides
+    constantly across 139k catalog rows and essentially never inside one
+    collection.
+
+    ``any_variant`` drops the condition and printing filters, to answer "do I
+    have this card at all, just graded differently?" when the exact one is
+    missing.
     """
-    game = _game_code(line.get("game_label"))
     number = collector_number_key(line.get("collector_number"))
-    set_name = (line.get("set_name") or "").strip()
-
-    q = select(CatalogCard)
+    if not number:
+        return []
+    game = _game_code(line.get("game_label"))
+    q = (select(InventoryItem)
+         .join(CatalogCard, CatalogCard.id == InventoryItem.catalog_card_id)
+         .where(InventoryItem.deleted == False,  # noqa: E712
+                CatalogCard.collector_number_norm == number))
+    if not any_variant:
+        q = q.where(InventoryItem.condition == line["condition"],
+                    InventoryItem.printing == line["printing_canonical"])
     if game:
         q = q.where(CatalogCard.game == game)
-    if number:
-        by_number = db.execute(
-            q.where(CatalogCard.collector_number_norm == number,
-                    func.lower(CatalogCard.set_name) == set_name.lower())
-        ).scalars().all()
-        if len(by_number) == 1:
-            return by_number[0], []
-        if by_number:
-            return None, by_number
-
-    name = name_key(line.get("card_name"))
-    if name:
-        by_name = db.execute(q.where(CatalogCard.name_norm == name)).scalars().all()
-        if number:
-            narrowed = [c for c in by_name
-                        if collector_number_key(c.collector_number) == number]
-            if len(narrowed) == 1:
-                return narrowed[0], []
-            if narrowed:
-                return None, narrowed
-        if len(by_name) == 1:
-            return by_name[0], []
-        return None, by_name[:20]
-    return None, []
+    rows = db.execute(q).scalars().all()
+    if len(rows) <= 1:
+        return rows
+    key = name_key(line.get("card_name")) or ""
+    narrowed = [r for r in rows
+                if _name_agrees(key, r.card.name_norm if r.card else None)]
+    return narrowed or rows
 
 
 def match_line(db: Session, line: dict) -> dict:
-    """Attach catalog/inventory identity and a match status to one slip line.
+    """Attach inventory identity and a match status to one slip line.
 
-    A line matches only when exactly one in-stock inventory record fits the
-    card + condition + printing the buyer actually bought. Because an inventory
-    record's identity includes its bin, the same card can legitimately sit in
-    several rows; picking one arbitrarily would send you to the wrong shelf, so
-    multiple in-stock rows are reported as candidates instead.
+    Four outcomes, each meaning something different to the person picking:
+
+    - ``matched`` — one in-stock record fits; nothing to do.
+    - ``ambiguous`` — several in-stock records fit, normally the same card in
+      more than one bin. Nothing is guessed, because a wrong guess sends you to
+      the wrong shelf mid-pick.
+    - ``out_of_stock`` — the right record exists but holds zero. Worth its own
+      state: it means you sold something your inventory says you don't have, so
+      the record, not the slip, is what needs fixing.
+    - ``unmatched`` — nothing in inventory looks like this at all.
     """
     line = dict(line)
     line["catalog_card_id"] = None
@@ -115,30 +139,15 @@ def match_line(db: Session, line: dict) -> dict:
     line["condition"] = condition
     line["printing_canonical"] = printing
 
-    card, candidates = _find_card(db, line)
-    if card is None:
-        line["match_status"] = AMBIGUOUS if candidates else UNMATCHED
-        line["candidates"] = [{"catalog_card_id": c.id,
-                               "label": f"{c.name} — {c.set_name or c.set_code} "
-                                        f"#{c.collector_number}"}
-                              for c in candidates]
-        line["match_note"] = ("several catalog cards fit this line"
-                              if candidates else "no catalog card found")
-        return line
-
-    line["catalog_card_id"] = card.id
-    rows = db.execute(select(InventoryItem).where(
-        InventoryItem.catalog_card_id == card.id,
-        InventoryItem.condition == condition,
-        InventoryItem.printing == printing,
-        InventoryItem.deleted == False,  # noqa: E712
-    )).scalars().all()
+    rows = find_stock(db, line)
     in_stock = [r for r in rows if r.quantity > 0]
     if len(in_stock) == 1:
-        line["inventory_id"] = in_stock[0].id
+        item = in_stock[0]
+        line["inventory_id"] = item.id
+        line["catalog_card_id"] = item.catalog_card_id
         line["match_status"] = MATCHED
-        if in_stock[0].quantity < (line.get("quantity") or 1):
-            line["match_note"] = (f"only {in_stock[0].quantity} in stock, "
+        if item.quantity < (line.get("quantity") or 1):
+            line["match_note"] = (f"only {item.quantity} in stock, "
                                   f"{line.get('quantity')} sold")
         return line
     if in_stock:
@@ -146,11 +155,29 @@ def match_line(db: Session, line: dict) -> dict:
         line["candidates"] = [_candidate(r) for r in in_stock]
         line["match_note"] = "in stock in more than one bin — pick which"
         return line
+    if rows:
+        line["catalog_card_id"] = rows[0].catalog_card_id
+        line["match_status"] = OUT_OF_STOCK
+        line["candidates"] = [_candidate(r) for r in rows]
+        line["match_note"] = (f"found this {condition}/{printing} record but it "
+                              f"holds 0 — stock may not have been entered")
+        return line
+
+    # Nothing in that exact grade/finish. Having the same card in another one is
+    # worth surfacing rather than reporting a flat miss: it usually means the
+    # card was graded or flagged wrong on the way in, which is the mistake this
+    # screen exists to catch.
+    variants = [r for r in find_stock(db, line, any_variant=True) if r.quantity > 0]
     line["match_status"] = UNMATCHED
-    line["candidates"] = [_candidate(r) for r in rows]
-    line["match_note"] = (
-        f"no {condition}/{printing} stock on hand"
-        if rows else f"card found but no {condition}/{printing} inventory record")
+    if variants:
+        line["catalog_card_id"] = variants[0].catalog_card_id
+        line["candidates"] = [_candidate(r) for r in variants]
+        have = sorted({f"{r.condition}/{r.printing}" for r in variants})
+        line["match_note"] = (f"no {condition}/{printing} in stock, but you have "
+                              f"this card as {', '.join(have)}")
+    else:
+        line["match_note"] = (
+            f"nothing in inventory matches #{line.get('collector_number')}")
     return line
 
 
@@ -165,13 +192,31 @@ def _parse_date(value: str | None) -> datetime | None:
         return None
 
 
+def default_shipping_charged(db: Session, subtotal: float) -> float:
+    """What the buyer paid for shipping, for a slip that doesn't print it.
+
+    Small orders ship at the flat rate the marketplace charges the buyer; above
+    the threshold shipping is free and the buyer paid nothing. It's revenue and
+    part of the commission base, so it's pre-filled rather than left at zero —
+    and it stays editable, since this is a default, not a lookup.
+    """
+    if subtotal < float(get_setting(db, "slip_free_shipping_over")):
+        return float(get_setting(db, "slip_shipping_charged"))
+    return 0.0
+
+
 def refresh(db: Session, slip: SlipOrder) -> SlipOrder:
-    """Recompute a slip order's fee and ready/blocked status from its lines."""
+    """Recompute a slip order's fee and ready/blocked status from its lines.
+
+    A fee the reviewer typed is left alone — the estimate exists to save typing,
+    not to overrule someone reading the actual figure off a payout.
+    """
     fee = order_svc.estimate_marketplace_fee(
         db, subtotal=slip.item_total, shipping_charged=slip.shipping_charged,
         tax=slip.tax, state=slip.ship_state)
-    slip.estimated_fee = fee["fee"]
     slip.fee_detail = fee
+    if not slip.fee_overridden:
+        slip.estimated_fee = fee["fee"]
     if slip.status not in ("committed", "duplicate"):
         unresolved = [l for l in (slip.lines or [])
                       if l.get("match_status") != MATCHED]
@@ -229,18 +274,22 @@ def build_batch(db: Session, *, filename: str, content: bytes) -> SlipBatch:
     db.add(batch)
     db.flush()
     for order in parsed:
+        subtotal = order.get("item_total") or 0.0
         slip = SlipOrder(
             batch_id=batch.id,
             order_number=order["order_number"],
+            # Held for the review screen only, so the name on the physical slip
+            # can be eyeballed while picking. It is not carried onto the order.
             buyer_name=order.get("buyer_name") or "",
             ordered_at=_parse_date(order.get("order_date")),
             ship_city=order.get("ship_city") or "",
             ship_state=order.get("ship_state") or "",
             ship_postal_code=order.get("ship_postal_code") or "",
-            item_total=order.get("item_total") or 0.0,
+            item_total=subtotal,
             quantity_total=order.get("quantity_total") or 0,
             reconciled=pdf_slips.reconciles(order),
             page_count=order.get("page_count") or 1,
+            shipping_charged=default_shipping_charged(db, subtotal),
             lines=[match_line(db, l) for l in order.get("lines") or []],
         )
         existing = db.execute(select(Order).where(
@@ -260,39 +309,27 @@ def build_batch(db: Session, *, filename: str, content: bytes) -> SlipBatch:
 
 
 def resolve_line(db: Session, slip: SlipOrder, index: int, *,
-                 inventory_id: int | None = None,
-                 catalog_card_id: int | None = None) -> SlipOrder:
-    """Point one line at a specific inventory record (or catalog card).
+                 inventory_id: int) -> SlipOrder:
+    """Point one line at a specific inventory record.
 
-    Picking an inventory record marks the line matched — that's the reviewer
-    overriding the automatic match, which is the whole point of the review step.
-    Picking only a catalog card re-runs matching against it.
+    Only inventory can be picked — a catalog card you don't stock isn't an
+    answer to "which of my cards is this", which is the question the review
+    screen is asking.
     """
     lines = list(slip.lines or [])
     if not 0 <= index < len(lines):
         raise ValueError(f"line {index} not on this order")
     line = dict(lines[index])
-    if inventory_id is not None:
-        item = db.get(InventoryItem, inventory_id)
-        if item is None or item.deleted:
-            raise ValueError("inventory record not found")
-        line["inventory_id"] = item.id
-        line["catalog_card_id"] = item.catalog_card_id
-        line["match_status"] = MATCHED
-        line["candidates"] = []
-        line["match_note"] = ("resolved by hand"
-                              if item.quantity >= (line.get("quantity") or 1)
-                              else f"resolved by hand, only {item.quantity} in stock")
-    elif catalog_card_id is not None:
-        line["catalog_card_id"] = catalog_card_id
-        card = db.get(CatalogCard, catalog_card_id)
-        if card is None:
-            raise ValueError("catalog card not found")
-        # Re-run inventory matching now that the card is pinned.
-        line["set_name"] = card.set_name or line.get("set_name")
-        line["collector_number"] = card.collector_number
-        line["card_name"] = card.name
-        line = match_line(db, line)
+    item = db.get(InventoryItem, inventory_id)
+    if item is None or item.deleted:
+        raise ValueError("inventory record not found")
+    line["inventory_id"] = item.id
+    line["catalog_card_id"] = item.catalog_card_id
+    line["match_status"] = MATCHED
+    line["candidates"] = []
+    line["match_note"] = ("resolved by hand"
+                          if item.quantity >= (line.get("quantity") or 1)
+                          else f"resolved by hand, only {item.quantity} in stock")
     lines[index] = line
     slip.lines = lines  # reassign so SQLAlchemy sees the JSON change
     refresh(db, slip)
@@ -324,16 +361,26 @@ def skip_line(db: Session, slip: SlipOrder, index: int) -> SlipOrder:
     return slip
 
 
-def _line_description(line: dict) -> str:
+def _line_description(db: Session, line: dict) -> str:
+    """Label a committed line the same way every other sale path does.
+
+    A matched line describes the *inventory record*, via the shared
+    ``item_description``, so an intake sale and a manual sale of the same card
+    read identically. It also means the catalog's spelling wins over the slip's
+    — TCGplayer drops diacritics ("Anduril" for "Andúril") and appends treatment
+    suffixes the catalog doesn't use, and the record is the better authority on
+    what the card is called.
+    """
+    item = (db.get(InventoryItem, line["inventory_id"])
+            if line.get("inventory_id") else None)
+    if item is not None:
+        return item_description(item)
     if line.get("parse_ok"):
-        bits = [line.get("card_name") or "", line.get("set_name") or ""]
-        number = line.get("collector_number")
-        tail = f"#{number}" if number else ""
         printing = line.get("printing_canonical") or line.get("printing")
         extra = "" if printing in (None, "normal") else f" {printing}"
-        return " — ".join(b for b in bits if b) + \
-            (f" {tail}" if tail else "") + \
-            f" [{line.get('condition') or ''}{extra}]"
+        return (f"{line.get('card_name') or ''} "
+                f"[#{line.get('collector_number') or ''}] "
+                f"{line.get('condition') or ''}{extra}").strip()
     return line.get("raw") or line.get("description") or ""
 
 
@@ -355,9 +402,12 @@ def commit_order(db: Session, slip: SlipOrder) -> Order:
     order = Order(
         marketplace=slip.batch.marketplace,
         external_order_id=slip.order_number,
-        buyer_name=slip.buyer_name,
+        # The buyer's name is deliberately not carried over. Destination
+        # city/state/ZIP are, because the fee estimate and any label need them;
+        # who the buyer was isn't ours to keep once the order exists.
+        buyer_name="",
         ship_to={"city": slip.ship_city, "state": slip.ship_state,
-                 "zip": slip.ship_postal_code, "name": slip.buyer_name},
+                 "zip": slip.ship_postal_code},
         status="open",
         order_total=round(slip.item_total, 2),
         shipping_charged=round(slip.shipping_charged, 2),
@@ -371,7 +421,7 @@ def commit_order(db: Session, slip: SlipOrder) -> Order:
             order_id=order.id,
             inventory_id=line.get("inventory_id"),
             catalog_card_id=line.get("catalog_card_id"),
-            description=_line_description(line),
+            description=_line_description(db, line),
             quantity=line.get("quantity") or 1,
             unit_price=line.get("unit_price") or 0.0,
         ))

@@ -240,7 +240,8 @@ def sell_bulk(product_id: int, payload: dict = Body(...),
         unit_price = total / qty
     order = order_svc.create_manual_order(
         db,
-        buyer_name=payload.get("buyer_name") or "Bulk sale",
+        platform=(payload.get("platform") or payload.get("buyer_name")
+                  or "Bulk sale"),
         items=[{"inventory_id": item.id, "quantity": qty,
                 "unit_price": unit_price,
                 "description": f"{product.name} — {qty} cards (bulk)"}],

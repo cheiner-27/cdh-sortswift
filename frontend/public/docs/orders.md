@@ -13,17 +13,22 @@ Orders are sales to fulfill. They arrive three ways:
 
 ## Manual / offline sale
 
-Use **+ Manual sale** for a sale that didn't come through a marketplace. Two
-fields to understand:
+Use **+ Manual sale** for a sale you're recording yourself rather than one that
+synced in. Two fields to understand:
 
-- **Buyer name** — this is the **customer**, not a platform. It's just a label
-  for your own reference (defaults to "walk-in" if left blank). The *platform* of
-  a manual sale is always the "manual" channel — that's what distinguishes it
-  from eBay/TCGplayer orders.
+- **Platform** — where it actually sold, and it is recorded as the order's
+  channel. A TCGplayer sale you type in counts as TCGplayer revenue, sitting
+  alongside the ones Order Intake brought in, rather than in a separate "manual"
+  bucket. Hand-entered sales stay distinguishable by their order id, which always
+  begins `manual-`.
 - **Items** — search your **live inventory** by card name (or comment) and click
   **Add**; no need to know internal IDs. The unit price pre-fills from the card's
   current price and each line shows how many you have on hand. Recording the sale
   deducts the cards (FIFO cost of goods booked) and logs it.
+
+> Buyer names aren't stored on orders at all — the list shows **Ship to**
+> (city and state) instead. Marking a hand-entered sale shipped won't try to tell
+> the marketplace, since it never knew about that order to begin with.
 
 Every order also has a **Costs** button to record what you paid for shipping and
 marketplace/processing fees after the fact (e.g. postage bought outside the app),

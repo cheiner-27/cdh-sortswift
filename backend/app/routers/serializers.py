@@ -118,6 +118,7 @@ def slip_order_dict(s: SlipOrder) -> dict:
         "item_total": s.item_total, "quantity_total": s.quantity_total,
         "reconciled": s.reconciled, "shipping_charged": s.shipping_charged,
         "tax": s.tax, "estimated_fee": s.estimated_fee,
+        "fee_overridden": s.fee_overridden,
         "fee_detail": s.fee_detail, "lines": s.lines,
         "page_count": s.page_count, "status": s.status, "error": s.error,
         "warning": s.warning, "order_id": s.order_id,

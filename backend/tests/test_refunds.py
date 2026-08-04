@@ -20,7 +20,7 @@ def stock(db, card, qty, cost):
 
 def sell(db, item, qty=1, price=20.0):
     return order_svc.create_manual_order(
-        db, buyer_name="t",
+        db, platform="t",
         items=[{"inventory_id": item.id, "quantity": qty, "unit_price": price}])
 
 
@@ -116,7 +116,7 @@ def test_pnl_nets_refund(db, card):
 def test_full_refund_credits_fees_back(db, card):
     item = stock(db, card, 1, 40.0)
     o = order_svc.create_manual_order(
-        db, buyer_name="t", marketplace_fees=13.25, shipping_cost=1.0,
+        db, platform="t", marketplace_fees=13.25, shipping_cost=1.0,
         items=[{"inventory_id": item.id, "quantity": 1, "unit_price": 100.0}])
     order_svc.mark_shipped(db, o)
     order_svc.refund_sale(db, o, mode="full", returned=True, return_shipping=1.0)
@@ -131,7 +131,7 @@ def test_full_refund_credits_fees_back(db, card):
 def test_full_refund_can_keep_part_of_the_fee(db, card):
     item = stock(db, card, 1, 40.0)
     o = order_svc.create_manual_order(
-        db, buyer_name="t", marketplace_fees=13.25,
+        db, platform="t", marketplace_fees=13.25,
         items=[{"inventory_id": item.id, "quantity": 1, "unit_price": 100.0}])
     order_svc.mark_shipped(db, o)
     order_svc.refund_sale(db, o, mode="full", returned=True, fees_refunded=10.00)
@@ -142,7 +142,7 @@ def test_full_refund_can_keep_part_of_the_fee(db, card):
 def test_full_refund_returns_shipping_the_buyer_paid(db, card):
     item = stock(db, card, 1, 5.0)
     o = order_svc.create_manual_order(
-        db, buyer_name="t", shipping_charged=4.99,
+        db, platform="t", shipping_charged=4.99,
         items=[{"inventory_id": item.id, "quantity": 1, "unit_price": 20.0}])
     order_svc.mark_shipped(db, o)
     order_svc.refund_sale(db, o, mode="full", returned=True)
@@ -155,7 +155,7 @@ def test_full_refund_returns_shipping_the_buyer_paid(db, card):
 def test_partial_refund_credits_fees_pro_rata(db, card):
     item = stock(db, card, 3, 5.0)
     o = order_svc.create_manual_order(
-        db, buyer_name="t", marketplace_fees=10.0,
+        db, platform="t", marketplace_fees=10.0,
         items=[{"inventory_id": item.id, "quantity": 1, "unit_price": 100.0}])
     order_svc.mark_shipped(db, o)
     order_svc.refund_sale(db, o, mode="partial", amount=25.0)
@@ -166,7 +166,7 @@ def test_partial_refund_credits_fees_pro_rata(db, card):
 def test_partial_refund_cap_includes_shipping_charged(db, card):
     item = stock(db, card, 3, 5.0)
     o = order_svc.create_manual_order(
-        db, buyer_name="t", shipping_charged=5.0,
+        db, platform="t", shipping_charged=5.0,
         items=[{"inventory_id": item.id, "quantity": 1, "unit_price": 20.0}])
     order_svc.refund_sale(db, o, mode="partial", amount=24.0)  # ≤ 20 + 5
     assert o.amount_refunded == 24.0
@@ -177,7 +177,7 @@ def test_refund_backs_out_cogs_on_migrated_line_with_no_inventory(db, card):
     behind them. The card still came back, so its cost must not stay expensed —
     otherwise it is double-counted when the card is re-added and re-sold."""
     from app.models import OrderItem
-    o = order_svc.create_manual_order(db, buyer_name="t", items=[], total=171.0,
+    o = order_svc.create_manual_order(db, platform="t", items=[], total=171.0,
                                       marketplace_fees=23.21, shipping_cost=5.28)
     db.add(OrderItem(order_id=o.id, catalog_card_id=card.id, description="Eevee & Snorlax GX",
                      quantity=1, unit_price=171.0, cogs=121.16))
@@ -197,7 +197,7 @@ def test_refund_backs_out_cogs_on_migrated_line_with_no_inventory(db, card):
 def test_writeoff_keeps_cogs_on_migrated_line(db, card):
     """The not-returned path is unchanged: an unlinked line keeps its COGS."""
     from app.models import OrderItem
-    o = order_svc.create_manual_order(db, buyer_name="t", items=[], total=50.0)
+    o = order_svc.create_manual_order(db, platform="t", items=[], total=50.0)
     db.add(OrderItem(order_id=o.id, catalog_card_id=card.id, description="Scyther",
                      quantity=1, unit_price=50.0, cogs=31.21))
     db.commit()
@@ -211,14 +211,14 @@ def test_refund_then_resell_books_cogs_once(db, card):
     expense the card's cost exactly once, on the sale that stuck."""
     item = stock(db, card, 1, 40.0)
     o1 = order_svc.create_manual_order(
-        db, buyer_name="b1", marketplace_fees=13.25,
+        db, platform="b1", marketplace_fees=13.25,
         items=[{"inventory_id": item.id, "quantity": 1, "unit_price": 100.0}])
     order_svc.mark_shipped(db, o1)
     order_svc.refund_sale(db, o1, mode="full", returned=True)
     assert item.quantity == 1                  # restocked (line was inventory-linked)
 
     o2 = order_svc.create_manual_order(
-        db, buyer_name="b2", marketplace_fees=14.0,
+        db, platform="b2", marketplace_fees=14.0,
         items=[{"inventory_id": item.id, "quantity": 1, "unit_price": 110.0}])
     order_svc.mark_shipped(db, o2)
     row = report_svc.realized_pnl(db, group_by="month")[0]

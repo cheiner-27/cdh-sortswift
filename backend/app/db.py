@@ -1,4 +1,5 @@
 """Database engine and session management."""
+import json
 import os
 from pathlib import Path
 
@@ -182,3 +183,62 @@ def ensure_schema() -> None:
                 conn.execute(text(
                     "ALTER TABLE staging ADD COLUMN source_bulk_id INTEGER "
                     "REFERENCES inventory(id)"))
+
+    # 9) Manual sales used to keep the platform they sold on in `buyer_name`,
+    #    with `marketplace` pinned to the literal "manual". That meant a
+    #    TCGplayer sale typed in by hand didn't count as TCGplayer revenue, and
+    #    it put a person-shaped field to a non-person use. Move the platform
+    #    into `marketplace` and clear the name; hand-entered sales stay
+    #    identifiable by their "manual-" id prefix (services/orders).
+    if "orders" in tables:
+        with engine.begin() as conn:
+            legacy = conn.execute(text(
+                "SELECT id, buyer_name FROM orders "
+                "WHERE marketplace = 'manual' AND buyer_name != ''")).fetchall()
+            for oid, platform in legacy:
+                key = (platform or "").strip().lower().replace(" ", "")
+                if not key:
+                    continue
+                # Skip anything that would collide on (marketplace, id).
+                clash = conn.execute(text(
+                    "SELECT 1 FROM orders WHERE marketplace = :m "
+                    "AND external_order_id = (SELECT external_order_id FROM "
+                    "orders WHERE id = :i) AND id != :i"),
+                    {"m": key, "i": oid}).first()
+                if clash:
+                    continue
+                conn.execute(text(
+                    "UPDATE orders SET marketplace = :m, buyer_name = '' "
+                    "WHERE id = :i"), {"m": key, "i": oid})
+
+    # 10) slip_orders.fee_overridden: the review screen lets the fee be typed
+    #     over, and the flag is what stops the estimate recomputing on top of it.
+    #     The table predates the column, and create_all only adds whole tables.
+    if "slip_orders" in tables:
+        scols = {c["name"] for c in insp.get_columns("slip_orders")}
+        if "fee_overridden" not in scols:
+            with engine.begin() as conn:
+                conn.execute(text(
+                    "ALTER TABLE slip_orders ADD COLUMN fee_overridden "
+                    "BOOLEAN NOT NULL DEFAULT 0"))
+
+    # 11) Buyer names are no longer retained on orders (only the destination
+    #     city/state/ZIP, which the fee estimate and shipping labels need).
+    #     Clear the ones recorded before that, including inside ship_to.
+    if "orders" in tables:
+        with engine.begin() as conn:
+            conn.execute(text("UPDATE orders SET buyer_name = '' "
+                              "WHERE buyer_name != ''"))
+            rows = conn.execute(text(
+                "SELECT id, ship_to FROM orders "
+                "WHERE ship_to LIKE '%\"name\"%'")).fetchall()
+            for oid, raw in rows:
+                try:
+                    data = json.loads(raw) if isinstance(raw, str) else (raw or {})
+                except (TypeError, ValueError):
+                    continue
+                if not isinstance(data, dict) or "name" not in data:
+                    continue
+                data.pop("name", None)
+                conn.execute(text("UPDATE orders SET ship_to = :s WHERE id = :i"),
+                             {"s": json.dumps(data), "i": oid})

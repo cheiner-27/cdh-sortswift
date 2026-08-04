@@ -12,6 +12,14 @@ const orderNet = (o) => o.order_total + (o.shipping_charged || 0) - (o.amount_re
   - orderCogs(o) - (o.shipping_cost || 0) - (o.return_shipping_cost || 0)
   - ((o.marketplace_fees || 0) - (o.fees_refunded || 0))
 const money = (n) => ({ color: n >= 0 ? 'var(--green)' : 'var(--red)' })
+// Destination, not buyer: names aren't retained on orders. eBay and the packing
+// slip intake spell the address fields differently, so accept both.
+const shipTo = (o) => {
+  const s = o.ship_to || {}
+  const city = s.city || ''
+  const state = s.state || s.stateOrProvince || ''
+  return [city, state].filter(Boolean).join(', ')
+}
 
 export default function OrdersPage() {
   const [msg, ok, err] = useMsg()
@@ -113,7 +121,7 @@ export default function OrdersPage() {
             checked={sorted.length > 0 && sorted.every((o) => selected.has(o.id))}
             onChange={(e) => setSelected(e.target.checked ? new Set(sorted.map((o) => o.id)) : new Set())} /></th>
           <SortTh k="order" accessor={(o) => o.ordered_at} sort={sort} toggle={sortBy}>Order</SortTh>
-          <SortTh k="buyer" accessor={(o) => o.buyer_name} sort={sort} toggle={sortBy}>Buyer / platform</SortTh>
+          <SortTh k="shipto" accessor={(o) => shipTo(o)} sort={sort} toggle={sortBy}>Ship to</SortTh>
           <th>Items</th>
           <SortTh k="total" accessor={(o) => o.order_total} sort={sort} toggle={sortBy}>Total</SortTh>
           <SortTh k="profit" accessor={(o) => orderNet(o)} sort={sort} toggle={sortBy}>Profit</SortTh>
@@ -128,7 +136,7 @@ export default function OrdersPage() {
               {o.is_direct && <span className="badge yellow">Direct</span>}
               <div className="muted">{o.ordered_at?.slice(0, 16).replace('T', ' ')}</div>
             </td>
-            <td>{o.buyer_name}</td>
+            <td>{shipTo(o)}</td>
             <td>{o.items.map((i) => {
               const margin = i.unit_price * i.quantity - (i.cogs || 0)
               return (
@@ -197,8 +205,10 @@ export default function OrdersPage() {
           <h2>Packing Slip</h2>
           <p>Order: {slip.order_number} ({slip.marketplace})<br />
             Date: {slip.ordered_at?.slice(0, 10)}<br />
-            Ship to: {slip.buyer_name}<br />
-            {slip.ship_to?.addressLine1 || slip.ship_to?.address_line1 || ''} {slip.ship_to?.city || ''} {slip.ship_to?.stateOrProvince || ''} {slip.ship_to?.postalCode || ''}</p>
+            Ship to: {slip.ship_to?.addressLine1 || slip.ship_to?.address_line1 || ''}{' '}
+            {slip.ship_to?.city || ''}{' '}
+            {slip.ship_to?.state || slip.ship_to?.stateOrProvince || ''}{' '}
+            {slip.ship_to?.zip || slip.ship_to?.postalCode || ''}</p>
           <table><thead><tr><th>Item</th><th>Qty</th><th>Price</th><th>Total</th></tr></thead>
             <tbody>{slip.items.map((i, idx) => (
               <tr key={idx}><td>{i.description}</td><td>{i.quantity}</td>
@@ -279,7 +289,7 @@ function ManualSaleModal({ onClose }) {
   const submit = async () => {
     try {
       await api.post('/api/orders/manual', {
-        buyer_name: platform || 'manual',
+        platform: platform || 'manual',
         ordered_at: saleDate || undefined,
         shipping_cost: shipping === '' ? 0 : Number(shipping),
         shipping_charged: shippingCharged === '' ? 0 : Number(shippingCharged),

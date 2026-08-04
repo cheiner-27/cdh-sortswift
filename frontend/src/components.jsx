@@ -45,13 +45,21 @@ export function SortTh({ k, accessor, sort, toggle, children, ...rest }) {
   )
 }
 
+// Dismissed by the ✕ or Escape, deliberately NOT by clicking the backdrop —
+// these hold half-entered orders, and a stray click outside the box used to
+// throw the whole thing away.
 export function Modal({ title, onClose, children, wide }) {
+  useEffect(() => {
+    const onKey = (e) => { if (e.key === 'Escape') onClose() }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [onClose])
   return (
-    <div className="modal-backdrop" onClick={(e) => e.target === e.currentTarget && onClose()}>
+    <div className="modal-backdrop">
       <div className="modal" style={wide ? { minWidth: 800 } : {}}>
         <div className="row center" style={{ justifyContent: 'space-between' }}>
           <h3>{title}</h3>
-          <button className="small" onClick={onClose}>✕</button>
+          <button className="small" onClick={onClose} title="Close (Esc)">✕</button>
         </div>
         {children}
       </div>

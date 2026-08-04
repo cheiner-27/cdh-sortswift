@@ -38,6 +38,11 @@ DEFAULTS = {
     "tcg_commission_pct": 0.1075,
     "tcg_processing_pct": 0.025,
     "tcg_processing_flat": 0.30,
+    # Packing slips don't print what the buyer paid for shipping, and small
+    # orders ship at a flat rate while larger ones ship free. Pre-fills the
+    # figure on intake; always editable per order.
+    "slip_shipping_charged": 1.49,
+    "slip_free_shipping_over": 5.00,
     # Pick-list ordering: ordered list of fields (condition, name, set_code,
     # bin, collector_number, printing). Custom/unmatched lines always sort last.
     "pick_list_sort": ["condition", "name"],

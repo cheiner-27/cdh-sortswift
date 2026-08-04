@@ -626,6 +626,8 @@ class SlipOrder(Base):
     # slip never prints it (see services/orders.estimate_marketplace_fee).
     tax: Mapped[float | None] = mapped_column(Float, nullable=True)
     estimated_fee: Mapped[float] = mapped_column(Float, default=0.0)
+    # Set when the reviewer typed a fee, which stops the estimate overwriting it.
+    fee_overridden: Mapped[bool] = mapped_column(Boolean, default=False)
     fee_detail: Mapped[dict] = mapped_column(JSON, default=dict)
     lines: Mapped[list] = mapped_column(JSON, default=list)
     page_count: Mapped[int] = mapped_column(Integer, default=1)

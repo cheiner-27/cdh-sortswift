@@ -70,7 +70,7 @@ def test_full_flow(client):
 
     # manual sale of 1 unit -> FIFO COGS -> mark shipped -> P&L
     r = client.post("/api/orders/manual", json={
-        "buyer_name": "tester",
+        "platform": "tester",
         "items": [{"inventory_id": inv_id, "quantity": 1, "unit_price": 22.0,
                    "description": "Flow Test Card"}]})
     order = r.json()
@@ -111,12 +111,13 @@ def test_bulk_pile_api_flow(client):
     assert mine["next_unit_cost"] == 0.05
 
     r = client.post(f"/api/bulk/piles/{pid}/sell",
-                    json={"quantity": 800, "total_price": 40.0, "buyer_name": "Whatnot"})
+                    json={"quantity": 800, "total_price": 40.0, "platform": "Whatnot"})
     assert r.status_code == 200
     order = client.get("/api/orders").json()
     sold = [o for o in order if o["id"] == r.json()["order_id"]][0]
     assert round(sum(li["cogs"] or 0 for li in sold["items"]), 2) == 43.0  # 500×.05 + 300×.06
-    assert sold["buyer_name"] == "Whatnot"   # platform recorded like a regular sale
+    assert sold["marketplace"] == "whatnot"  # platform recorded like a regular sale
+    assert sold["buyer_name"] == ""          # buyer names are not retained
     assert [p for p in client.get("/api/bulk/piles").json() if p["id"] == pid][0]["on_hand"] == 700
 
     # delete the (stocked) pile -> hidden from the pile list, sale history kept

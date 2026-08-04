@@ -193,7 +193,11 @@ def mark_shipped(db: Session, order: Order, tracking_number: str | None = None,
     if carrier:
         order.carrier = carrier
     warnings = []
-    if order.marketplace in ADAPTERS and order.tracking_number:
+    # A hand-entered sale carries the platform in `marketplace`, but the
+    # marketplace never heard of this order id — telling it to mark shipped
+    # would just fail. Shipping was handled wherever the sale was made.
+    if (order.marketplace in ADAPTERS and order.tracking_number
+            and not is_manual_entry(order)):
         try:
             ADAPTERS[order.marketplace].mark_shipped(
                 db, order.external_order_id, order.tracking_number,
@@ -414,29 +418,59 @@ def delete_order(db: Session, order: Order) -> None:
     db.commit()
 
 
+MANUAL_PREFIX = "manual-"
+
+
+def is_manual_entry(order: Order) -> bool:
+    """Was this sale typed in rather than synced from a marketplace?
+
+    A manual sale records the platform it sold on in ``marketplace``, so that
+    field no longer distinguishes a hand-entered TCGplayer sale from one the
+    intake or a sync produced. The ``manual-`` id prefix does, and it's already
+    on every such order, so nothing new has to be stored to tell them apart.
+    """
+    return (order.external_order_id or "").startswith(MANUAL_PREFIX)
+
+
+def platform_key(platform: str | None) -> str:
+    """Canonical marketplace value for a sale platform ('eBay' -> 'ebay')."""
+    key = (platform or "").strip().lower().replace(" ", "")
+    return key or "manual"
+
+
 def manual_sale_platforms(db: Session) -> list[str]:
     """Platform names for the manual-sale dropdown: the fixed defaults plus any
-    platform already recorded on a prior manual order."""
+    platform already recorded on a prior manual sale."""
     from ..domain import SALE_PLATFORMS
-    used = {o.buyer_name for o in db.execute(
-        select(Order).where(Order.marketplace == "manual")).scalars() if o.buyer_name}
-    return sorted(set(SALE_PLATFORMS) | used)
+    known = {platform_key(p): p for p in SALE_PLATFORMS}
+    used = {o.marketplace for o in db.execute(select(Order)).scalars()
+            if is_manual_entry(o) and o.marketplace
+            and o.marketplace != "manual"}
+    return sorted({known.get(k, k) for k in used} | set(SALE_PLATFORMS))
 
 
-def create_manual_order(db: Session, *, buyer_name: str, items: list[dict],
+def create_manual_order(db: Session, *, platform: str, items: list[dict],
                         total: float | None = None, shipping_cost: float = 0.0,
                         marketplace_fees: float = 0.0,
                         shipping_charged: float = 0.0, ordered_at=None) -> Order:
-    """Record a manual/offline sale (non-marketplace). ``ordered_at`` sets the
-    sale date (defaults to now) so a late-recorded sale lands on the right day."""
+    """Record a manual/offline sale.
+
+    ``platform`` is where it sold (eBay, TCGplayer, a local shop) and is stored
+    in ``marketplace``, so a hand-entered TCGplayer sale counts as TCGplayer
+    revenue rather than landing in a separate "manual" channel. The ``manual-``
+    id prefix is what still marks it as hand-entered — see ``is_manual_entry``.
+
+    ``ordered_at`` sets the sale date (defaults to now) so a late-recorded sale
+    lands on the right day.
+    """
     from ..models import OrderItem
     when = parse_sale_date(ordered_at)
-    order = Order(marketplace="manual",
+    order = Order(marketplace=platform_key(platform),
                   # microsecond precision so two manual sales in the same second
                   # (e.g. several bulk packs in a row) don't collide on the
                   # (marketplace, external_order_id) unique constraint.
-                  external_order_id=f"manual-{utcnow().strftime('%Y%m%d%H%M%S%f')}",
-                  buyer_name=buyer_name, order_total=total or 0.0,
+                  external_order_id=f"{MANUAL_PREFIX}{utcnow().strftime('%Y%m%d%H%M%S%f')}",
+                  buyer_name="", order_total=total or 0.0,
                   shipping_cost=round(float(shipping_cost or 0), 2),
                   marketplace_fees=round(float(marketplace_fees or 0), 2),
                   shipping_charged=round(float(shipping_charged or 0), 2),
