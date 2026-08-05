@@ -1,6 +1,8 @@
 import React, { useEffect, useMemo, useState } from 'react'
 import { api, download, fmtMoney, scanImageUrl } from '../api.js'
-import { CardSearch, Field, Modal, Msg, useMeta, useMsg } from '../components.jsx'
+import {
+  BulkPileSelect, CardSearch, Field, Modal, Msg, useBulkPiles, useMeta, useMsg,
+} from '../components.jsx'
 
 const SORTS = {
   scan: (a, b) => a.seq - b.seq,
@@ -21,7 +23,7 @@ export default function ScanPage() {
   const [msg, ok, err] = useMsg()
   const [settings, setSettings] = useState(null)
   const [pulls, setPulls] = useState([])
-  const [piles, setPiles] = useState([])
+  const { piles } = useBulkPiles()
   const [items, setItems] = useState([])
   const [activePull, setActivePull] = useState(null)
   const [selected, setSelected] = useState(new Set())
@@ -35,7 +37,7 @@ export default function ScanPage() {
   // a session default — it's a per-card property set during review.
   const [form, setForm] = useState({
     folder: '', game: 'mtg', use_subfolder_bins: false, pair_front_back: false,
-    condition: 'NM', language: 'en', bin: '', cost: '', source_bulk_id: '',
+    condition: 'NM', language: 'en', bin: '', cost: '', source_bulk_id: null,
   })
 
   useEffect(() => {
@@ -44,17 +46,7 @@ export default function ScanPage() {
       setForm((f) => ({ ...f, folder: s.scan_folder || '', ...s.session_defaults }))
     })
     refreshPulls()
-    refreshPiles()
   }, [])
-
-  const refreshPiles = () => api.get('/api/bulk/piles').then(setPiles).catch(() => {})
-
-  // source_bulk_id is the pile's INVENTORY id, not its pile id — the two id
-  // spaces overlap, so sending the pile id silently pulled from an unrelated
-  // card. A pile with no stock has nothing to pull, so it isn't offered.
-  const pileOptions = piles.filter((p) => p.inventory_id && p.on_hand > 0)
-  const pileLabel = (p) => `${p.name} (${p.on_hand.toLocaleString()}${
-    p.acquired_at ? ` · ${p.acquired_at.slice(0, 10)}` : ''})`
 
   const refreshPulls = () => api.get('/api/scans/pulls').then(setPulls)
   const loadQueue = async (pullId) => {
@@ -75,7 +67,7 @@ export default function ScanPage() {
           condition: form.condition,
           language: form.language, bin: form.bin,
           cost: form.cost === '' ? null : Number(form.cost),
-          source_bulk_id: form.source_bulk_id === '' ? null : Number(form.source_bulk_id),
+          source_bulk_id: form.source_bulk_id ?? null,
         },
       })
       ok(`Pulled ${res.image_count} new image(s), ${res.items} queue item(s)`)
@@ -201,16 +193,13 @@ export default function ScanPage() {
             onChange={(e) => setForm({ ...form, bin: e.target.value })} /></Field>
           <Field label="Unit cost ($)"><input style={{ width: 80 }} value={form.cost}
             onChange={(e) => setForm({ ...form, cost: e.target.value })}
-            disabled={form.source_bulk_id !== ''}
-            title={form.source_bulk_id !== '' ? 'Ignored — cost comes from the bulk pile these are pulled from' : ''} /></Field>
+            disabled={form.source_bulk_id != null}
+            title={form.source_bulk_id != null ? 'Ignored — cost comes from the bulk pile these are pulled from' : ''} /></Field>
           <Field label="Pull from bulk lot">
-            <select style={{ width: 210 }} value={form.source_bulk_id}
-              onChange={(e) => setForm({ ...form, source_bulk_id: e.target.value })}
-              title="Optional: cards confirmed this session are pulled OUT of this bulk pile (decrement + carry its cost and purchase date) instead of added as fresh stock.">
-              <option value="">— fresh stock —</option>
-              {pileOptions.map((p) => (
-                <option key={p.id} value={p.inventory_id}>{pileLabel(p)}</option>))}
-            </select></Field>
+            <BulkPileSelect piles={piles} value={form.source_bulk_id}
+              onChange={(v) => setForm({ ...form, source_bulk_id: v })}
+              title="Optional: cards confirmed this session are pulled OUT of this bulk pile (decrement + carry its cost and purchase date) instead of added as fresh stock." />
+          </Field>
         </div>
         <div className="row center">
           <label title="Instead of the images directly in the folder, treat each immediate subfolder as its own bin and pull the images inside each.">
@@ -304,12 +293,10 @@ export default function ScanPage() {
               {meta.languages.map((l) => <option key={l}>{l}</option>)}</select>
             <input placeholder="bin…" style={{ width: 90 }}
               onChange={(e) => setBulkVals({ ...bulkVals, bin: e.target.value })} />
-            <select title="Set source bulk lot for the selected cards"
-              onChange={(e) => setBulkVals({ ...bulkVals, source_bulk_id: e.target.value === '' ? null : Number(e.target.value) })} defaultValue="__none__">
-              <option value="__none__" disabled>bulk lot…</option>
-              <option value="">— fresh stock —</option>
-              {pileOptions.map((p) => (
-                <option key={p.id} value={p.inventory_id}>{pileLabel(p)}</option>))}</select>
+            <BulkPileSelect piles={piles} width={180} placeholder="bulk lot…"
+              title="Set source bulk lot for the selected cards"
+              value={bulkVals.source_bulk_id}
+              onChange={(v) => setBulkVals({ ...bulkVals, source_bulk_id: v })} />
             <button className="small" disabled={!selected.size}
               onClick={() => bulk('set', bulkVals)}>Bulk set</button>
             <button className="small primary" disabled={!selected.size}
@@ -365,13 +352,9 @@ export default function ScanPage() {
                   onBlur={(e) => e.target.value !== it.bin && patchItem(it.id, { bin: e.target.value })} /></td>
                 <td><input type="number" min="1" style={{ width: 55 }} defaultValue={it.quantity}
                   onBlur={(e) => patchItem(it.id, { quantity: Number(e.target.value) || 1 })} /></td>
-                <td><select style={{ width: 120 }} value={it.source_bulk_id ?? ''}
-                  title="Pull this card out of a bulk pile (decrement + carry its cost and purchase date) instead of adding fresh stock"
-                  onChange={(e) => patchItem(it.id, { source_bulk_id: e.target.value === '' ? null : Number(e.target.value) })}>
-                  <option value="">— fresh —</option>
-                  {pileOptions.map((p) => (
-                    <option key={p.id} value={p.inventory_id}>{p.name}</option>))}
-                </select></td>
+                <td><BulkPileSelect piles={piles} width={120} compact freshLabel="— fresh —"
+                  value={it.source_bulk_id ?? null}
+                  onChange={(v) => patchItem(it.id, { source_bulk_id: v })} /></td>
                 <td>
                   <button className="small primary" disabled={!it.card} onClick={() => confirmOne(it)}>Confirm</button>{' '}
                   <button className="small danger" onClick={() => rejectOne(it)}>Reject</button>

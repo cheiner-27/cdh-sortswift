@@ -118,6 +118,60 @@ export function useMeta() {
   return meta
 }
 
+// --- Pull from bulk --------------------------------------------------------
+// Every place a card can come OUT of a bulk pile instead of being added as fresh
+// stock: the scan pull form, the scan queue, staging rows, manual add.
+export function useBulkPiles() {
+  const [piles, setPiles] = useState([])
+  const refresh = () => api.get('/api/bulk/piles').then(setPiles).catch(() => {})
+  useEffect(() => { refresh() }, [])
+  // source_bulk_id is the pile's INVENTORY id, not its pile id — the two id
+  // spaces overlap, so sending the pile id silently pulled from an unrelated card.
+  const pileOf = (invId) => piles.find((p) => p.inventory_id === invId)
+  return {
+    piles, refresh, pileOf,
+    pileName: (invId) => (invId ? pileOf(invId)?.name || `#${invId}` : ''),
+  }
+}
+
+export const PULL_FROM_BULK_HINT =
+  'Pull the card OUT of this bulk pile — decrementing it and carrying its ' +
+  'per-card cost and purchase date across — instead of adding fresh stock.'
+
+// Bulk-pile picker. `value` is an inventory id, null for fresh stock, or
+// undefined for "leave alone" (only offered when `placeholder` is set, for the
+// batch-set bars); onChange reports back in those same three shapes.
+export function BulkPileSelect({ piles, value, onChange, width = 210,
+  compact = false, placeholder = '', freshLabel = '— fresh stock —',
+  title = PULL_FROM_BULK_HINT }) {
+  const UNSET = '__unset__'
+  const current = value === undefined && placeholder ? UNSET : String(value ?? '')
+  // A pile with nothing on hand has nothing to pull, so it isn't offered — but a
+  // row already pointing at one (emptied out since, or a stale id) still shows
+  // it, rather than silently reading as fresh stock.
+  const opts = piles.filter((p) => p.inventory_id
+    && (p.on_hand > 0 || String(p.inventory_id) === current))
+  const stale = current !== '' && current !== UNSET
+    && !opts.some((p) => String(p.inventory_id) === current)
+  // Card count and purchase date are what you pick a pile by; too wide for an
+  // in-table picker, hence `compact`.
+  const label = (p) => (compact ? p.name
+    : `${p.name} (${p.on_hand.toLocaleString()}${
+      p.acquired_at ? ` · ${p.acquired_at.slice(0, 10)}` : ''})`)
+    + (p.on_hand > 0 ? '' : ' — empty')
+  return (
+    <select style={{ width }} value={current} title={title}
+      onChange={(e) => onChange(
+        e.target.value === UNSET ? undefined
+          : e.target.value === '' ? null : Number(e.target.value))}>
+      {placeholder && <option value={UNSET}>{placeholder}</option>}
+      <option value="">{freshLabel}</option>
+      {opts.map((p) => <option key={p.id} value={p.inventory_id}>{label(p)}</option>)}
+      {stale && <option value={current}>{`#${current} — missing pile`}</option>}
+    </select>
+  )
+}
+
 // Catalog card search box with dropdown results.
 // clearOnSelect: wipe results after picking (pick-mode); false keeps the list
 // for browsing. selectLabel: text on the action button.

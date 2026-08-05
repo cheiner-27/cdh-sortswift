@@ -60,6 +60,11 @@ def _clean(field: str, value):
         return whole(value, field, min_value=1)
     if field in ("cost", "price"):
         return money(value, field, default=None)
+    if field == "source_bulk_id":
+        # A blank/absent pick means fresh stock, not pile #0. Coerced because the
+        # pickers send it as a select value: a "12" left as text would miss every
+        # ``InventoryItem`` lookup at approve time.
+        return whole(value, field, default=None, min_value=1)
     return value
 
 
@@ -85,15 +90,26 @@ def bulk_edit(payload: dict = Body(...), db: Session = Depends(get_db)):
     The bread-and-butter case is one purchase date + cost for a whole batch that
     came in together. Only keys present in ``set`` are touched, and blank values
     are dropped by the caller, so this never clears a field — per-row editing
-    handles exceptions and clears.
+    handles exceptions and clears. The one exception is ``source_bulk_id``, where
+    an explicit null means "these are fresh stock, not pulled from a pile".
     """
     ids = payload.get("ids") or []
-    changes = {k: v for k, v in (payload.get("set") or {}).items() if v not in ("", None)}
-    if not ids or not changes:
+    raw = payload.get("set") or {}
+    changes = {k: v for k, v in raw.items() if v not in ("", None)}
+    # source_bulk_id is the one field a null is meaningful on: "book these as
+    # fresh stock" is a real batch edit, so it's read from the unfiltered dict.
+    clear_bulk = "source_bulk_id" in raw and raw["source_bulk_id"] in ("", None)
+    if not ids or not (changes or clear_bulk):
         return {"updated": 0, "rows": []}
     rows = db.execute(select(StagingItem).where(
         StagingItem.id.in_(ids))).scalars().all()
     for row in rows:
+        # Set the bulk source first so the cost/date guards below see the source
+        # this edit is giving the row, not the one it had a moment ago.
+        if clear_bulk:
+            row.source_bulk_id = None
+        elif "source_bulk_id" in changes:
+            row.source_bulk_id = _clean("source_bulk_id", changes["source_bulk_id"])
         for f in ("condition", "printing", "language", "bin", "comment",
                   "quantity", "price"):
             if f in changes:
@@ -156,7 +172,7 @@ def _row_fields(r: dict) -> dict:
         price=_clean("price", r.get("price")),
         acquired_at=_parse_date(r.get("acquired_at")),
         comment=r.get("comment", ""),
-        source_bulk_id=r.get("source_bulk_id"),
+        source_bulk_id=_clean("source_bulk_id", r.get("source_bulk_id")),
     )
 
 
