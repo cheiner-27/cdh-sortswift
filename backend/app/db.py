@@ -242,3 +242,13 @@ def ensure_schema() -> None:
                 data.pop("name", None)
                 conn.execute(text("UPDATE orders SET ship_to = :s WHERE id = :i"),
                              {"s": json.dumps(data), "i": oid})
+
+    # 12) slip_orders.shipping_cost: what the seller paid for postage, entered
+    #     on the review screen so all of an order's costs land in one place.
+    if "slip_orders" in tables:
+        scols = {c["name"] for c in insp.get_columns("slip_orders")}
+        if "shipping_cost" not in scols:
+            with engine.begin() as conn:
+                conn.execute(text(
+                    "ALTER TABLE slip_orders ADD COLUMN shipping_cost "
+                    "FLOAT DEFAULT 0.0"))

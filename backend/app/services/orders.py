@@ -1,8 +1,8 @@
 """Order fulfillment (Section 8): pick lists, packing slips, Shippo labels,
 mark-shipped, refunds/cancellations."""
 import logging
-import math
 from datetime import datetime, timezone
+from decimal import ROUND_HALF_UP, Decimal
 
 import httpx
 from sqlalchemy import select
@@ -309,11 +309,13 @@ def refund_sale(db: Session, order: Order, *, mode: str = "full",
             "restocked": restocked, "unlinked_lines": unlinked}
 
 
-def ceil_cent(value: float) -> float:
-    """Round up to the nearest cent. Marketplace fees are billed on cent-rounded
-    percentages, so a fee computed from unrounded products is systematically a
-    hair low."""
-    return math.ceil(round(value, 6) * 100) / 100.0
+def round_cent(value: float) -> float:
+    """Round to the nearest cent (half up). Marketplace fees are billed on
+    cent-rounded percentages, so each component is rounded the same way TCGplayer
+    rounds it before the pieces are summed — rounding the total instead would let
+    two components' fractional cents cancel out in a way the real bill doesn't."""
+    return float(Decimal(str(round(value, 6))).quantize(
+        Decimal("0.01"), rounding=ROUND_HALF_UP))
 
 
 def estimate_marketplace_fee(db: Session, *, subtotal: float,
@@ -340,8 +342,8 @@ def estimate_marketplace_fee(db: Session, *, subtotal: float,
     estimated = tax is None
     if estimated:
         tax = round(taxable * state_tax_rate(state), 2)
-    commission = ceil_cent(commission_pct * taxable)
-    processing = ceil_cent(processing_pct * (taxable + tax))
+    commission = round_cent(commission_pct * taxable)
+    processing = round_cent(processing_pct * (taxable + tax))
     return {
         "fee": round(commission + processing_flat + processing, 2),
         "commission": commission,

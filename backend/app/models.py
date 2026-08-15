@@ -622,6 +622,10 @@ class SlipOrder(Base):
     quantity_total: Mapped[int] = mapped_column(Integer, default=0)
     reconciled: Mapped[bool] = mapped_column(Boolean, default=False)
     shipping_charged: Mapped[float] = mapped_column(Float, default=0.0)
+    # What the seller paid for postage — not printed on the slip, typed in on
+    # the review screen so all of an order's costs land in one place. Carried
+    # onto the live Order at commit (see services/order_intake.commit_order).
+    shipping_cost: Mapped[float] = mapped_column(Float, default=0.0)
     # Buyer-paid tax. NULL means "estimate it from the destination state" — the
     # slip never prints it (see services/orders.estimate_marketplace_fee).
     tax: Mapped[float | None] = mapped_column(Float, nullable=True)

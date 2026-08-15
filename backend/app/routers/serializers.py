@@ -117,6 +117,7 @@ def slip_order_dict(s: SlipOrder) -> dict:
         "ship_postal_code": s.ship_postal_code,
         "item_total": s.item_total, "quantity_total": s.quantity_total,
         "reconciled": s.reconciled, "shipping_charged": s.shipping_charged,
+        "shipping_cost": s.shipping_cost,
         "tax": s.tax, "estimated_fee": s.estimated_fee,
         "fee_overridden": s.fee_overridden,
         "fee_detail": s.fee_detail, "lines": s.lines,

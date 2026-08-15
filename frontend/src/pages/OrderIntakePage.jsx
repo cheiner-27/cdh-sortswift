@@ -17,7 +17,8 @@ function lineLabel(l) {
   if (!l.parse_ok) return l.raw || l.description || '(unreadable)'
   const finish = l.printing_canonical && l.printing_canonical !== 'normal'
     ? ` ${l.printing_canonical}` : ''
-  return `${l.card_name} · #${l.collector_number} · ${l.condition || l.condition_label}${finish}`
+  const number = l.collector_number ? `#${l.collector_number} · ` : ''
+  return `${l.card_name} · ${number}${l.condition || l.condition_label}${finish}`
 }
 
 export default function OrderIntakePage() {
@@ -289,6 +290,13 @@ function SlipCard({ slip, onPatch, onCommit, onRematch, onSkip, onResolve }) {
             title="Not printed on the slip — pre-filled from your flat rate. Counts as revenue and as part of the commission base."
             onBlur={(e) => onPatch({ shipping_charged: e.target.value || 0 })} />
         </Field>
+        <Field label="Shipping cost (postage)">
+          <input type="number" step="0.01" style={{ width: 90 }} disabled={locked}
+            key={`shipcost-${slip.id}-${slip.shipping_cost}`}
+            defaultValue={slip.shipping_cost || ''}
+            title="What you paid for postage on this order. Not printed on the slip — type it in here so all of this order's costs land in one place."
+            onBlur={(e) => onPatch({ shipping_cost: e.target.value || 0 })} />
+        </Field>
         <Field label={`Fee${slip.fee_overridden ? '' : ' (estimated)'}`}>
           <input type="number" step="0.01" style={{ width: 90 }} disabled={locked}
             key={`fee-${slip.id}-${slip.estimated_fee}`}
@@ -305,7 +313,7 @@ function SlipCard({ slip, onPatch, onCommit, onRematch, onSkip, onResolve }) {
         <div className="stat" style={{ minWidth: 110 }}>
           <div className="value">
             {fmtMoney(round2((slip.item_total || 0) + (slip.shipping_charged || 0)
-              - (slip.estimated_fee || 0)))}
+              - (slip.estimated_fee || 0) - (slip.shipping_cost || 0)))}
           </div>
           <div className="label">net before COGS</div>
         </div>

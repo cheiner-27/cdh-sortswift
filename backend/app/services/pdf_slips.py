@@ -257,6 +257,17 @@ _DESCRIPTION = re.compile(
     r'^(?P<head>.+?)\s+-\s+#(?P<number>\S+)\s+-\s+(?P<rarity>\S+)\s+-\s+'
     r'(?P<condition>.+?)$')
 
+# Pre-numbering-era sets (Beta, Antiquities, Legends, ...) predate TCGplayer's
+# on-card numbering scheme, so the slip prints no "#number" segment at all:
+# "{game} - {set} - {card name} - {rarity} - {condition}". Without the "#" to
+# anchor on, head has to be greedy rather than lazy — greedy backtracking finds
+# the *rightmost* "- {single token} - " split, which lands on the rarity/
+# condition boundary even when the set or card name itself contains " - ".
+# (A lazy head plus an optional number group would instead stop at the first,
+# usually wrong, split.)
+_DESCRIPTION_NO_NUMBER = re.compile(
+    r'^(?P<head>.+)\s+-\s+(?P<rarity>\S+)\s+-\s+(?P<condition>.+)$')
+
 # TCGplayer appends the finish to the condition ("Near Mint Foil"), so printing
 # is recovered by stripping a known finish suffix off the condition cell.
 _FINISH_SUFFIXES = {
@@ -297,8 +308,13 @@ def split_description(description: str) -> dict:
     so an odd line is flagged for review instead of silently mis-parsed.
     """
     m = _DESCRIPTION.match(description)
-    if not m:
-        return {'parse_ok': False, 'raw': description}
+    if m:
+        number = m.group('number')
+    else:
+        m = _DESCRIPTION_NO_NUMBER.match(description)
+        if not m:
+            return {'parse_ok': False, 'raw': description}
+        number = None
     parts = m.group('head').split(' - ')
     condition = m.group('condition').strip()
     printing = 'normal'
@@ -313,7 +329,7 @@ def split_description(description: str) -> dict:
         'game_label': parts[0] if parts else '',
         'set_name': parts[1] if len(parts) > 1 else '',
         'card_name': ' - '.join(parts[2:]) if len(parts) > 2 else '',
-        'collector_number': m.group('number'),
+        'collector_number': number,
         'rarity_letter': m.group('rarity'),
         'condition_label': condition,
         'printing': printing,

@@ -74,6 +74,9 @@ def edit_order(slip_id: int, payload: dict = Body(...),
     if "shipping_charged" in payload:
         slip.shipping_charged = money(payload["shipping_charged"],
                                       "shipping_charged", default=0.0)
+    if "shipping_cost" in payload:
+        slip.shipping_cost = money(payload["shipping_cost"],
+                                   "shipping_cost", default=0.0)
     if "tax" in payload:
         slip.tax = money(payload["tax"], "tax", default=None)
     if "estimated_fee" in payload:

@@ -53,6 +53,13 @@ before. Scoping to inventory is what makes the looser key safe: a collector
 number collides constantly across a 139,000-card catalog and effectively never
 inside one collection.
 
+**Pre-numbering-era sets** — Alpha/Beta/Unlimited, Arabian Nights, Antiquities,
+Legends, The Dark, Fallen Empires, and the rest of that early run — predate
+Magic's on-card numbering scheme, so TCGplayer's slip prints no collector number
+at all for that line. Those lines fall back to matching on the card name alone,
+still scoped to your inventory the same way the numbered path is, since there's
+nothing else on the slip to key on.
+
 A line ends up in one of four states:
 
 - **matched** — exactly one in-stock record fits. Nothing to do.
@@ -89,6 +96,16 @@ Settings). It's revenue and part of the commission base, so it shouldn't sit at
 zero by default — but it's a guess about *your* rates, not something read off the
 slip, so it stays editable per order.
 
+## Shipping cost (postage)
+
+This is the other side of shipping: what *you* paid for postage, not what the
+buyer paid you. Slips never print it, so it starts at zero — type it in here as
+you buy the label, and it's the last cost on this screen: it comes off **net
+before COGS** alongside the fee, and carries onto the order on commit the same
+way the fee estimate does. Recording it here means every cost on the order is in
+one place instead of split between this screen and a follow-up edit on
+**Costs** after commit.
+
 ## The anticipated fee
 
 Each order shows the fee TCGplayer is expected to take, before the payout
@@ -97,10 +114,9 @@ confirms it:
 - **commission** on the items plus any shipping the buyer paid
 - **a flat charge plus a processing percentage** on the tax-inclusive total
 
-Each percentage is rounded **up** to the cent and then added, which is how the
-fee is actually billed — computing it from unrounded products lands a hair low.
-The rates live in Settings, so a change in your seller level is a setting, not a
-code change.
+Each percentage is rounded to the **nearest** cent (same as your payout) and then
+added. The rates live in Settings, so a change in your seller level is a
+setting, not a code change.
 
 The **Fee** box is the estimate, and you can type straight over it when you know
 better. Doing so pins your figure and stops it being recalculated; clearing the

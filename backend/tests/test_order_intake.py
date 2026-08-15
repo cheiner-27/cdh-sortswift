@@ -17,6 +17,7 @@ from app.services.inventory import add_stock, item_description
 DATA = Path(__file__).parent / "data"
 SAMPLE = DATA / "packing_slips_sample.pdf"   # 3 single-page orders
 MULTI = DATA / "packing_slips_multi.pdf"     # 5 orders, incl. 2-page + foil
+VINTAGE = DATA / "packing_slips_vintage.pdf"  # includes an unnumbered pre-numbering-era (Antiquities) line
 
 LOTR = "Universes Beyond: The Lord of the Rings: Tales of Middle-earth"
 
@@ -71,11 +72,25 @@ def test_sample_pdf_parses_three_orders():
 
 def test_every_line_parses_and_totals_reconcile():
     """The printed subtotal and quantity are an independent check on the parse."""
-    for path in (SAMPLE, MULTI):
+    for path in (SAMPLE, MULTI, VINTAGE):
         for number, order in slips(path).items():
             assert pdf_slips.reconciles(order), f"{number} did not reconcile"
             for line in order["lines"]:
                 assert line["parse_ok"], f"{number}: {line.get('raw')}"
+
+
+def test_vintage_set_line_parses_without_a_collector_number():
+    """Pre-numbering-era sets (Antiquities here) print no '#number' segment at
+    all, unlike every modern TCGplayer listing."""
+    order = slips(VINTAGE)["5BABB616-3D99C2-46D93"]
+    line = order["lines"][0]
+    assert line["parse_ok"]
+    assert line["game_label"] == "Magic"
+    assert line["set_name"] == "Antiquities"
+    assert line["card_name"] == "Hurkyl's Recall"
+    assert line["collector_number"] is None
+    assert line["rarity_letter"] == "R"
+    assert line["condition_label"] == "Near Mint"
 
 
 def test_hyphenated_words_rejoin_without_a_space():
@@ -150,12 +165,12 @@ def test_rejects_a_non_slip_upload():
 
 # --- fee math ----------------------------------------------------------------
 
-def test_fee_rounds_each_component_up_then_sums(db):
-    """10.75% of 34.95 = 3.757125 -> 3.76; 2.5% of 34.95 = 0.873750 -> 0.88."""
+def test_fee_rounds_each_component_to_the_nearest_cent(db):
+    """10.75% of 34.95 = 3.757125 -> 3.76; 2.5% of 34.95 = 0.873750 -> 0.87."""
     fee = order_svc.estimate_marketplace_fee(db, subtotal=34.95, tax=0.0)
     assert fee["commission"] == 3.76
-    assert fee["processing"] == 1.18          # 0.88 + 0.30 flat
-    assert fee["fee"] == 4.94
+    assert fee["processing"] == 1.17          # 0.87 + 0.30 flat
+    assert fee["fee"] == 4.93
     assert fee["tax_estimated"] is False
 
 
@@ -163,7 +178,7 @@ def test_commission_covers_shipping_charged_to_the_buyer(db):
     fee = order_svc.estimate_marketplace_fee(db, subtotal=10.0,
                                              shipping_charged=5.0, tax=0.0)
     assert fee["fee_base"] == 15.0
-    assert fee["commission"] == order_svc.ceil_cent(0.1075 * 15.0) == 1.62
+    assert fee["commission"] == order_svc.round_cent(0.1075 * 15.0) == 1.61
 
 
 def test_processing_is_charged_on_the_tax_inclusive_total(db):
@@ -183,19 +198,19 @@ def test_tax_is_estimated_from_the_destination_state(db):
         db, subtotal=100.0, state="ZZ")["tax_rate"] == pytest.approx(0.07)
 
 
-def test_ceil_cent_leaves_exact_cents_alone():
-    assert order_svc.ceil_cent(0.30) == 0.30
-    assert order_svc.ceil_cent(1.00) == 1.00
-    assert order_svc.ceil_cent(0.8701) == 0.88
-    assert order_svc.ceil_cent(0.001) == 0.01
+def test_round_cent_leaves_exact_cents_alone():
+    assert order_svc.round_cent(0.30) == 0.30
+    assert order_svc.round_cent(1.00) == 1.00
+    assert order_svc.round_cent(0.8701) == 0.87
+    assert order_svc.round_cent(0.001) == 0.00
 
 
-def test_ceil_cent_does_not_round_float_noise_up_a_cent():
+def test_round_cent_does_not_round_float_noise_up_a_cent():
     """2.5% of $12 is exactly 30c, but in binary floating point it lands a hair
-    over, which a naive ceil would bill as 31c."""
+    over, which naive rounding would bill as 31c."""
     assert 0.025 * 12.0 > 0.30           # the noise is real
-    assert order_svc.ceil_cent(0.025 * 12.0) == 0.30
-    assert order_svc.ceil_cent(0.1075 * 40.0) == 4.30
+    assert order_svc.round_cent(0.025 * 12.0) == 0.30
+    assert order_svc.round_cent(0.1075 * 40.0) == 4.30
 
 
 # --- intake, matching, commit ------------------------------------------------
@@ -240,6 +255,23 @@ def test_matched_order_becomes_ready_and_commits_open_without_deducting(db):
     assert (a_item.quantity, h_item.quantity) == (3, 1)
     assert all(li.cogs == 0.0 for li in order.items)
     assert slip.status == "committed" and slip.order_id == order.id
+
+
+def test_vintage_card_matches_by_name_when_the_slip_prints_no_number(db):
+    """No collector number is printed for this line, so matching has to fall
+    back to the card name, still scoped to inventory like the numbered path."""
+    card = make_card(db, name="Hurkyl's Recall", set_name="Antiquities", number="58")
+    item = stock(db, card, qty=1, cost=20.0, bin="V1")
+
+    batch = intake.build_batch(db, filename="v.pdf", content=VINTAGE.read_bytes())
+    slip = next(s for s in batch.orders
+                if s.order_number == "5BABB616-3D99C2-46D93")
+    assert slip.status == "ready", slip.error
+    assert slip.lines[0]["match_status"] == "matched"
+    assert slip.lines[0]["inventory_id"] == item.id
+
+    order = intake.commit_order(db, slip)
+    assert order.order_total == 85.0
 
 
 def test_batch_commit_skips_blocked_orders_and_lets_the_rest_through(db):
@@ -403,7 +435,7 @@ def test_pinning_the_tax_makes_the_fee_exact(db):
     db.commit()
     assert slip.fee_detail["tax_estimated"] is False
     assert slip.fee_detail["tax"] == 2.10
-    assert slip.estimated_fee == round(3.76 + 0.30 + order_svc.ceil_cent(
+    assert slip.estimated_fee == round(3.76 + 0.30 + order_svc.round_cent(
         0.025 * (34.95 + 2.10)), 2)
 
 

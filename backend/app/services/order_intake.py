@@ -82,18 +82,27 @@ def find_stock(db: Session, line: dict, *, any_variant: bool = False) -> list[In
     constantly across 139k catalog rows and essentially never inside one
     collection.
 
+    Pre-numbering-era slip lines (Beta, Antiquities, Legends, ...) carry no
+    collector number at all, so there's nothing to key on but the name prefix
+    itself — still scoped to inventory for the same reason a number is safe
+    there.
+
     ``any_variant`` drops the condition and printing filters, to answer "do I
     have this card at all, just graded differently?" when the exact one is
     missing.
     """
     number = collector_number_key(line.get("collector_number"))
-    if not number:
-        return []
     game = _game_code(line.get("game_label"))
     q = (select(InventoryItem)
          .join(CatalogCard, CatalogCard.id == InventoryItem.catalog_card_id)
-         .where(InventoryItem.deleted == False,  # noqa: E712
-                CatalogCard.collector_number_norm == number))
+         .where(InventoryItem.deleted == False))  # noqa: E712
+    if number:
+        q = q.where(CatalogCard.collector_number_norm == number)
+    else:
+        key = name_key(line.get("card_name"))
+        if not key:
+            return []
+        q = q.where(CatalogCard.name_norm.like(f"{key[:NAME_PREFIX]}%"))
     if not any_variant:
         q = q.where(InventoryItem.condition == line["condition"],
                     InventoryItem.printing == line["printing_canonical"])
@@ -175,9 +184,14 @@ def match_line(db: Session, line: dict) -> dict:
         have = sorted({f"{r.condition}/{r.printing}" for r in variants})
         line["match_note"] = (f"no {condition}/{printing} in stock, but you have "
                               f"this card as {', '.join(have)}")
-    else:
+    elif line.get("collector_number"):
         line["match_note"] = (
             f"nothing in inventory matches #{line.get('collector_number')}")
+    else:
+        line["match_note"] = (
+            f"nothing in inventory matches \"{line.get('card_name')}\" "
+            f"({line.get('set_name') or 'unknown set'}) — no collector number "
+            f"printed on the slip for this one")
     return line
 
 
@@ -378,8 +392,9 @@ def _line_description(db: Session, line: dict) -> str:
     if line.get("parse_ok"):
         printing = line.get("printing_canonical") or line.get("printing")
         extra = "" if printing in (None, "normal") else f" {printing}"
+        number = f"[#{line['collector_number']}] " if line.get("collector_number") else ""
         return (f"{line.get('card_name') or ''} "
-                f"[#{line.get('collector_number') or ''}] "
+                f"{number}"
                 f"{line.get('condition') or ''}{extra}").strip()
     return line.get("raw") or line.get("description") or ""
 
@@ -411,6 +426,7 @@ def commit_order(db: Session, slip: SlipOrder) -> Order:
         status="open",
         order_total=round(slip.item_total, 2),
         shipping_charged=round(slip.shipping_charged, 2),
+        shipping_cost=round(slip.shipping_cost, 2),
         marketplace_fees=slip.estimated_fee,
         ordered_at=slip.ordered_at or datetime.now(timezone.utc),
     )
