@@ -56,13 +56,22 @@ def _candidate(item: InventoryItem) -> dict:
 
 
 def _name_agrees(line_key: str, card_key: str | None) -> bool:
-    """Do two name keys refer to the same card? Either side may carry extra
-    text, so a shared prefix counts on whichever is shorter."""
+    """Do two name keys refer to the same card?
+
+    Either side may carry extra text, so a shared prefix counts on whichever
+    is shorter. A crossover card's slip label pairs a new name with the
+    original ("Suki of the Kyoshi Warriors - Captain Sisay (Borderless)"
+    against the catalog's "Captain Sisay"), which shares no prefix at all, so
+    the shorter key appearing anywhere in the longer one counts too.
+    """
     card_key = card_key or ""
     if not line_key or not card_key:
         return False
     n = min(len(line_key), len(card_key), NAME_PREFIX)
-    return line_key[:n] == card_key[:n]
+    if line_key[:n] == card_key[:n]:
+        return True
+    shorter, longer = sorted((line_key, card_key), key=len)
+    return len(shorter) >= 4 and shorter in longer
 
 
 def find_stock(db: Session, line: dict, *, any_variant: bool = False) -> list[InventoryItem]:
@@ -74,13 +83,17 @@ def find_stock(db: Session, line: dict, *, any_variant: bool = False) -> list[In
     signal worth having — it means the stock was never entered, or was entered
     wrong.
 
-    The key is the collector number plus a name prefix. Set name is deliberately
+    The key is the collector number plus a name check. Set name is deliberately
     *not* used: TCGplayer's set naming diverges from the catalog's often enough
     to be useless as a key ("Commander: Innistrad: Crimson Vow" against "Crimson
     Vow Commander", "The List Reprints" against the original set). Scoping to
-    inventory is what makes the looser key safe — a collector number collides
-    constantly across 139k catalog rows and essentially never inside one
-    collection.
+    inventory only bounds the *count* of same-numbered rows a collision can
+    surface, though — a low collector number ("1", "13") is genuinely common
+    across hundreds of different cards even within one collection, so the name
+    check is load-bearing, not a tie-breaker for an edge case. When nothing in
+    the number-matched rows agrees by name, that means none of them is the
+    right card — returning them anyway would show the picker a stranger's card
+    as if it were an in-stock or ambiguous match for this one.
 
     Pre-numbering-era slip lines (Beta, Antiquities, Legends, ...) carry no
     collector number at all, so there's nothing to key on but the name prefix
@@ -112,9 +125,8 @@ def find_stock(db: Session, line: dict, *, any_variant: bool = False) -> list[In
     if len(rows) <= 1:
         return rows
     key = name_key(line.get("card_name")) or ""
-    narrowed = [r for r in rows
-                if _name_agrees(key, r.card.name_norm if r.card else None)]
-    return narrowed or rows
+    return [r for r in rows
+            if _name_agrees(key, r.card.name_norm if r.card else None)]
 
 
 def match_line(db: Session, line: dict) -> dict:

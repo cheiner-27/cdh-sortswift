@@ -250,23 +250,36 @@ _ORDER_DATE = re.compile(r'Order Date:\s*(\d{2}/\d{2}/\d{4})')
 _BUYER = re.compile(r'Buyer Name:\s*(.+?)$')
 _PAGE_OF = re.compile(r'Page\s+(\d+)\s+of\s+(\d+)')
 
+# Condition is anchored to TCGplayer's five printed labels rather than left
+# open-ended, because rarity is NOT always the single token it is for Magic
+# (C/U/R/M). Pokemon prints multi-word rarities ("Holo Rare", "Shiny Holo
+# Rare", "Ultra Rare"), and a single-token rarity capture leaves the extra
+# words stuck to the front of condition ("Shiny Holo Rare - Near Mint
+# Holofoil"), which normalize_condition() doesn't recognize and silently
+# defaults to NM — misreporting a Lightly Played card as Near Mint and out of
+# stock in whatever it actually is. Anchoring condition lets rarity capture
+# as many words as it needs.
+_CONDITION_TAIL = (r'(?:Near Mint|Lightly Played|Moderately Played|'
+                   r'Heavily Played|Damaged)(?:\s+\S+)*')
+
 # "{game} - {set} - {card name} - #{number} - {rarity} - {condition}".
 # Anchored from the right because the tail is fixed-arity while set and card
 # names both contain " - ", colons, commas and parentheses.
 _DESCRIPTION = re.compile(
-    r'^(?P<head>.+?)\s+-\s+#(?P<number>\S+)\s+-\s+(?P<rarity>\S+)\s+-\s+'
-    r'(?P<condition>.+?)$')
+    r'^(?P<head>.+?)\s+-\s+#(?P<number>\S+)\s+-\s+(?P<rarity>.+?)\s+-\s+'
+    r'(?P<condition>' + _CONDITION_TAIL + r')$')
 
 # Pre-numbering-era sets (Beta, Antiquities, Legends, ...) predate TCGplayer's
 # on-card numbering scheme, so the slip prints no "#number" segment at all:
 # "{game} - {set} - {card name} - {rarity} - {condition}". Without the "#" to
 # anchor on, head has to be greedy rather than lazy — greedy backtracking finds
-# the *rightmost* "- {single token} - " split, which lands on the rarity/
-# condition boundary even when the set or card name itself contains " - ".
-# (A lazy head plus an optional number group would instead stop at the first,
-# usually wrong, split.)
+# the *rightmost* "- {rarity} - {condition}" split, which lands on the right
+# boundary even when the set or card name itself contains " - ". (A lazy head
+# plus an optional number group would instead stop at the first, usually
+# wrong, split.)
 _DESCRIPTION_NO_NUMBER = re.compile(
-    r'^(?P<head>.+)\s+-\s+(?P<rarity>\S+)\s+-\s+(?P<condition>.+)$')
+    r'^(?P<head>.+)\s+-\s+(?P<rarity>.+?)\s+-\s+'
+    r'(?P<condition>' + _CONDITION_TAIL + r')$')
 
 # TCGplayer appends the finish to the condition ("Near Mint Foil"), so printing
 # is recovered by stripping a known finish suffix off the condition cell.

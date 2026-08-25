@@ -156,6 +156,23 @@ def test_slash_collector_number_and_played_conditions():
         "Near Mint", "Lightly Played", "Moderately Played", "Heavily Played"}
 
 
+def test_multi_word_pokemon_rarity_does_not_leak_into_condition():
+    """Pokemon rarities are routinely multi-word ("Shiny Holo Rare", "Ultra
+    Rare"), unlike Magic's single-letter C/U/R/M. A rarity capture that only
+    grabs one token leaves the rest stuck to the front of condition
+    ("Shiny Holo Rare - Near Mint Holofoil"), which normalize_condition()
+    doesn't recognize and silently defaults to NM — misreporting the card's
+    actual condition."""
+    line = pdf_slips.split_description(
+        "Pokemon - Hidden Fates: Shiny Vault - Umbreon GX - #SV69/SV94 - "
+        "Shiny Holo Rare - Near Mint Holofoil")
+    assert line["parse_ok"]
+    assert line["card_name"] == "Umbreon GX"
+    assert line["rarity_letter"] == "Shiny Holo Rare"
+    assert line["condition_label"] == "Near Mint"
+    assert line["printing"] == "holo"
+
+
 def test_rejects_a_non_slip_upload():
     with pytest.raises(pdf_slips.SlipParseError):
         pdf_slips.parse_packing_slips(b"just a text file, not a PDF")
@@ -497,6 +514,55 @@ def test_a_different_card_at_the_same_number_is_not_matched(db):
     keep = stock(db, other, qty=1, cost=1.0)
     line = slips(MULTI)["5BABB616-5A5A6F-972D0"]["lines"][0]
     assert intake.match_line(db, line)["inventory_id"] == keep.id
+
+
+def _slip_line(*, card_name, collector_number, condition_label="Near Mint",
+               printing="normal", game_label="Magic", quantity=1) -> dict:
+    """A hand-built slip line for cases no fixture PDF covers."""
+    return {"parse_ok": True, "game_label": game_label, "set_name": "",
+            "card_name": card_name, "collector_number": collector_number,
+            "rarity_letter": "R", "condition_label": condition_label,
+            "printing": printing, "quantity": quantity, "unit_price": 1.0,
+            "line_total": 1.0}
+
+
+def test_crossover_card_matches_by_the_original_name_inside_a_compound_slip_name(db):
+    """TCGplayer labels a crossover card as "{new IP character} - {original
+    card name} (Treatment)", which shares no prefix at all with the catalog's
+    plain original name — the whole reason a collector-number collision with
+    an unrelated card at the same number must not win by default."""
+    original = make_card(db, name="Captain Sisay",
+                         set_name="Avatar: The Last Airbender", number="47")
+    target = stock(db, original, qty=1, cost=1.0)
+    unrelated = make_card(db, name="Industrial Advancement",
+                          set_name="Kamigawa: Neon Dynasty", number="47")
+    stock(db, unrelated, qty=1, cost=1.0)
+
+    line = _slip_line(
+        card_name="Suki of the Kyoshi Warriors - Captain Sisay (Borderless)",
+        collector_number="47")
+    matched = intake.match_line(db, line)
+    assert matched["match_status"] == "matched"
+    assert matched["inventory_id"] == target.id
+
+
+def test_number_collision_with_no_name_agreement_is_not_surfaced_as_a_candidate(db):
+    """If nothing at the colliding number agrees by name, none of them is the
+    right card — showing them as ambiguous/out-of-stock candidates would point
+    the picker at a stranger's card instead of reporting an honest miss."""
+    unrelated_a = make_card(db, name="Industrial Advancement",
+                            set_name="Kamigawa: Neon Dynasty", number="47")
+    stock(db, unrelated_a, qty=1, cost=1.0)
+    unrelated_b = make_card(db, name="Angelic Arbiter",
+                            set_name="Guilds of Ravnica", number="47")
+    stock(db, unrelated_b, qty=1, cost=1.0)
+
+    line = _slip_line(card_name="Some Card Not In This Catalog At All",
+                      collector_number="47")
+    matched = intake.match_line(db, line)
+    assert matched["match_status"] == "unmatched"
+    assert matched["inventory_id"] is None
+    assert matched["candidates"] == []
 
 
 def test_matching_never_reaches_for_a_card_you_do_not_stock(db):

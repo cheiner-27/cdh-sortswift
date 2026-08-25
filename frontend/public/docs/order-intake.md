@@ -38,20 +38,27 @@ the step: a packing slip is a list of cards you're about to pull off a shelf, so
 a hit against a card you don't own tells you nothing, and a miss is the useful
 signal — it means the stock was never entered, or was entered wrong.
 
-The key is the **collector number plus the card name**, with the name compared as
-a prefix rather than an exact string. Finish and condition must agree exactly:
-TCGplayer prints the finish inside the condition ("Near Mint Foil"), and a
-non-foil record will never satisfy a foil sale, because it isn't the same
-physical card.
+The key is the **collector number plus the card name**, with the name compared
+loosely rather than as an exact string — either a shared prefix, or one name
+found inside the other. The second form is what a crossover card needs:
+TCGplayer labels those "{new character} - {original card} (Treatment)" — e.g.
+"Suki of the Kyoshi Warriors - Captain Sisay (Borderless)" — which shares no
+prefix at all with the catalog's plain "Captain Sisay", but does contain it.
+Finish and condition must agree exactly: TCGplayer prints the finish inside the
+condition ("Near Mint Foil"), and a non-foil record will never satisfy a foil
+sale, because it isn't the same physical card.
 
 Set name is deliberately **not** part of the key. TCGplayer names sets
 differently from the catalog often enough to be useless for matching — it lists
 "Commander: Innistrad: Crimson Vow" where the catalog says "Crimson Vow
 Commander", and a card on The List under its List heading rather than the set it
 was originally printed in. Matching on set name is what caused most misses
-before. Scoping to inventory is what makes the looser key safe: a collector
-number collides constantly across a 139,000-card catalog and effectively never
-inside one collection.
+before. Scoping to inventory keeps a collector-number collision to a
+manageable few rows instead of the full catalog, but low numbers ("1", "13")
+are genuinely common across many different cards even within one collection —
+the name check is what tells them apart, not a formality. When none of the
+colliding rows agrees by name, that means the right card isn't among them, so
+the line is reported as unmatched rather than pointed at a stranger's card.
 
 **Pre-numbering-era sets** — Alpha/Beta/Unlimited, Arabian Nights, Antiquities,
 Legends, The Dark, Fallen Empires, and the rest of that early run — predate
