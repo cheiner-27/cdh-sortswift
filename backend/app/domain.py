@@ -26,6 +26,16 @@ CANONICAL_PRINTINGS = [
     "normal", "holo", "foil", "first_edition", "reverse_holo",
 ]
 
+# Ordered, printing-specific price sources. Never fall back to an unrelated
+# finish just because SQLite happened to return its row first.
+PRINTING_SUBTYPES = {
+    "normal": ("Normal", "Unlimited"),
+    "foil": ("Foil", "Holofoil", "Unlimited Holofoil"),
+    "holo": ("Holofoil", "Foil", "Unlimited Holofoil"),
+    "reverse_holo": ("Reverse Holofoil",),
+    "first_edition": ("1st Edition",),
+}
+
 PRINTING_SYNONYMS = {
     "": "normal",
     "non-foil": "normal", "nonfoil": "normal", "regular": "normal", "base": "normal",

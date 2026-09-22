@@ -77,3 +77,13 @@ frontend/
 - Shippo is called via its REST API with `httpx` (equivalent to the SDK, fewer dependency risks on Python 3.14). Configure the token in Settings.
 - OCR requires a local Tesseract install; without it, recognition falls back to perceptual-hash matching (after building reference phashes) and manual search.
 - CardMarket is a reserved future slot (marketplace list and pricing sources are extensible; EUR→USD conversion hook exists in the pricing config design).
+
+## TCGplayer reconciliation and pricing
+
+Use **Cycle Counts** to upload the current TCGplayer Pricing Custom Export.
+Review each variance to update local stock or prepare a TCG correction, then
+approve to learn SKU IDs and current prices. Download quantity corrections
+separately and upload them once. Verify with a fresh CSV before using **Pricing**
+to simulate, reprice and export a price-only CSV. Age rules support a step ladder
+and an optional clock start; ignoring manual overrides never clears them.
+See the in-app Pricing, Cycle counts, and Exports & imports documentation.

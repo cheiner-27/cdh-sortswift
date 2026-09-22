@@ -61,40 +61,50 @@ _PRODUCT_LINE = {"mtg": "Magic", "pokemon": "Pokemon",
 
 
 def _tcgplayer_layout(db: Session, items: list[InventoryItem]) -> tuple[list[str], list[list]]:
-    from ..models import PriceData
+    from fastapi import HTTPException
+    from .pricing import _pick_price_row, _price_rows
+    from .tcg_counts import identity
 
-    def price_row(pid, foil):
-        if not pid:
-            return None
-        rows = db.execute(select(PriceData).where(
-            PriceData.tcgplayer_product_id == pid)).scalars().all() if pid else []
-        matched = [r for r in rows if (r.sub_type.lower() != "normal") == foil]
-        return (matched or rows or [None])[0]
-
-    rows = []
+    rows, used_skus = [], set()
     for it in items:
         card = it.card
-        pid = card.tcgplayer_product_id if card else ""
-        foil = it.printing not in ("normal", "first_edition")
-        pr = price_row(pid, foil) if card else None
-        our_price = it.price_override or it.current_price or ""
+        pid = card.tcgplayer_product_id if card else None
+        pr = _pick_price_row(_price_rows(db, pid), it.printing) if pid else None
+        listing = next((l for l in it.listings if l.marketplace == "tcgplayer"), None)
+        metadata = (listing.tcg_metadata or {}) if listing else {}
+        valid = metadata.get("identity") == identity(it)
+        sku = listing.tcg_sku_id if listing and valid else ""
+        raw = metadata.get("raw", {}) if valid else {}
+        if sku and sku in used_skus:
+            raise HTTPException(409, f"TCG SKU {sku} has multiple inventory links; reconcile before exporting")
+        used_skus.add(sku)
+        # Export the applied platform target, even when its manual override was
+        # deliberately ignored during repricing and remains stored.
+        our_price = listing.listed_price if listing else None
+        if our_price is None:
+            our_price = it.price_override if it.price_override is not None else it.current_price
+        if our_price is not None:
+            our_price = max(.01, our_price)
+        condition = CONDITION_LABELS.get(it.condition, it.condition)
+        suffix = {"foil": " Foil", "holo": " Holofoil", "reverse_holo": " Reverse Holofoil",
+                  "first_edition": " 1st Edition"}.get(it.printing, "")
         rows.append([
-            pid or "",
-            _PRODUCT_LINE.get(card.game, card.game) if card else "",
-            card.set_name if card else "",
-            card.name if card else (it.custom_sku.product.name if it.custom_sku else ""),
-            "",  # Title (unused for singles)
-            card.collector_number if card else "",
-            card.rarity if card else "",
-            CONDITION_LABELS.get(it.condition, it.condition),
+            sku or "",
+            raw.get("Product Line", _PRODUCT_LINE.get(card.game, card.game) if card else ""),
+            raw.get("Set Name", card.set_name if card else ""),
+            raw.get("Product Name", card.name if card else (it.custom_sku.product.name if it.custom_sku else "")),
+            raw.get("Title", ""),
+            raw.get("Number", card.collector_number if card else ""),
+            raw.get("Rarity", card.rarity if card else ""),
+            raw.get("Condition", condition + suffix),
             pr.market if pr and pr.market is not None else "",
             pr.direct_low if pr and pr.direct_low is not None else "",
-            "",  # TCG Low Price With Shipping (not tracked locally)
+            "",
             pr.low if pr and pr.low is not None else "",
-            it.quantity,          # Total Quantity (current on-hand)
-            0,                    # Add to Quantity (0 = re-price only, don't add stock)
-            our_price,            # TCG Marketplace Price (the price we're setting)
-            card.image_url if card else "",
+            it.quantity,
+            0,  # price-only; quantity corrections have their own cycle-count export
+            our_price if our_price is not None else "",
+            raw.get("Photo URL", card.image_url if card else ""),
         ])
     return TCGPLAYER_HEADERS, rows
 

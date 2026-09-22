@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react'
-import { api, fmtMoney } from '../api.js'
+import { api, download, fmtMoney } from '../api.js'
 import { Field, Msg, useMeta, useMsg } from '../components.jsx'
 
 const SOURCE_LABELS = {
@@ -12,30 +12,37 @@ export default function PricingPage() {
   const [msg, ok, err] = useMsg()
   const [game, setGame] = useState('mtg')
   const [config, setConfig] = useState(null)
-  const [repriceMk, setRepriceMk] = useState('ebay')
+  const [repriceMk, setRepriceMk] = useState('tcgplayer')
+  const [ignoreOverrides, setIgnoreOverrides] = useState(false)
+  const [savedConfig, setSavedConfig] = useState('')
   const [sim, setSim] = useState(null)
   const [simLargeOnly, setSimLargeOnly] = useState(false)
   const [busy, setBusy] = useState(false)
 
   useEffect(() => {
-    api.get(`/api/pricing/config/${game}`).then((c) => setConfig(structuredClone(c)))
+    let cancelled = false
+    setConfig(null)
+    api.get(`/api/pricing/config/${game}`).then((c) => {
+      if (!cancelled) { setConfig(structuredClone(c)); setSavedConfig(JSON.stringify(c)) }
+    }).catch((e) => { if (!cancelled) err(e) })
     setSim(null)
+    return () => { cancelled = true }
   }, [game])
 
   const save = async () => {
-    try { await api.put(`/api/pricing/config/${game}`, config); ok('Rules saved') }
+    try { await api.put(`/api/pricing/config/${game}`, config); setSavedConfig(JSON.stringify(config)); setSim(null); ok('Rules saved') }
     catch (e) { err(e) }
   }
   const simulate = async () => {
     setBusy(true)
-    try { setSim(await api.post(`/api/pricing/simulate/${repriceMk}`, { filter: { game } })) }
+    try { setSim(await api.post(`/api/pricing/simulate/${repriceMk}`, { filter: { game }, ignore_overrides: ignoreOverrides })) }
     catch (e) { err(e) } finally { setBusy(false) }
   }
   const apply = async () => {
     if (!window.confirm(`Reprice all in-stock ${game} inventory for ${repriceMk}?`)) return
     setBusy(true)
     try {
-      const r = await api.post(`/api/pricing/apply/${repriceMk}`, { filter: { game } })
+      const r = await api.post(`/api/pricing/apply/${repriceMk}`, { filter: { game }, ignore_overrides: ignoreOverrides })
       ok(`Repriced: ${r.updated} updated, ${r.skipped} skipped`); setSim(null)
     } catch (e) { err(e) } finally { setBusy(false) }
   }
@@ -48,7 +55,7 @@ export default function PricingPage() {
     const off = {}; meta.marketplaces.forEach((m) => { off[m] = { pct: 0, flat: 0 } })
     n.tiers.push({
       name: `tier ${n.tiers.length + 1}`, min: last ? last.max : 0, max: null,
-      modifiers: { condition: { NM: 100, LP: 85, MP: 70, HP: 50, DMG: 30 }, printing: {}, language: {}, age_decay: { days: 0, pct: 0 } },
+      modifiers: { condition: { NM: 100, LP: 85, MP: 70, HP: 50, DMG: 30 }, printing: {}, language: {}, age_decay: { anchor: null, steps: [] } },
       offsets: off,
       guards: { max_move_pct: null, tier_lock: { up: false, down: false }, rarity_floors: {}, cost_floor: true },
       rounding: '0.01',
@@ -57,6 +64,7 @@ export default function PricingPage() {
   })
 
   if (!meta || !config) return null
+  const unsaved = JSON.stringify(config) !== savedConfig
   const shownSim = sim ? sim.results.filter((r) => !simLargeOnly || r.large_move) : []
   const unusedSources = (meta.price_sources || []).filter((s) => !config.sources.includes(s))
 
@@ -70,7 +78,7 @@ export default function PricingPage() {
 
       <p className="muted" style={{ maxWidth: 900 }}>
         For each price <b>tier</b> (a band of the card's current price) the engine picks a baseline
-        source, multiplies the stacking modifiers (condition × printing × language × age), applies the
+        source for that printing, multiplies the stacking modifiers (condition × printing × language × age), applies the
         per-platform offset, enforces the guards, then rounds. Full walk-through in <b>Help → Pricing rules</b>.
       </p>
 
@@ -129,16 +137,37 @@ export default function PricingPage() {
               <ModTable title="Condition %" keys={meta.conditions} table={tier.modifiers.condition} dflt="100"
                 onChange={(k, v) => setTier(i, (t) => { v === '' ? delete t.modifiers.condition[k] : t.modifiers.condition[k] = Number(v) })} />
             </div>
-            <ModTable title="Printing %" keys={meta.printings} table={tier.modifiers.printing}
+            <ModTable title="Extra printing %" hint="The baseline already uses this printing’s market price. Blank means no extra change." keys={meta.printings} table={tier.modifiers.printing}
               onChange={(k, v) => setTier(i, (t) => { v === '' ? delete t.modifiers.printing[k] : t.modifiers.printing[k] = Number(v) })} />
             <ModTable title="Language %" keys={meta.languages} table={tier.modifiers.language}
               onChange={(k, v) => setTier(i, (t) => { v === '' ? delete t.modifiers.language[k] : t.modifiers.language[k] = Number(v) })} />
             <div>
               <h3>Age decay</h3>
-              <Field label="after days in stock"><input style={{ width: 60 }} value={tier.modifiers.age_decay.days}
-                onChange={(e) => setTier(i, (t) => { t.modifiers.age_decay.days = Number(e.target.value) || 0 })} /></Field>
-              <Field label="reduce %"><input style={{ width: 60 }} value={tier.modifiers.age_decay.pct}
-                onChange={(e) => setTier(i, (t) => { t.modifiers.age_decay.pct = Number(e.target.value) || 0 })} /></Field>
+              <Field label="Clock starts (blank = acquisition date)">
+                <input type="date" value={tier.modifiers.age_decay.anchor || ''}
+                  onChange={(e) => setTier(i, (t) => { t.modifiers.age_decay.anchor = e.target.value || null })} />
+              </Field>
+              <p className="muted" style={{ maxWidth: 250 }}>The newest of acquisition date and clock start wins. The highest reached step applies.</p>
+              {tier.modifiers.age_decay.steps.map((step, j) => (
+                <div className="row center" key={j}>
+                  <input aria-label="Age threshold days" type="number" min="0" step="1" style={{ width: 65 }} value={step.days}
+                    onChange={(e) => setTier(i, (t) => { t.modifiers.age_decay.steps[j].days = Number(e.target.value) })} /> days
+                  <input aria-label="Age reduction percent" type="number" min="0" max="100" style={{ width: 65 }} value={step.pct}
+                    onChange={(e) => setTier(i, (t) => { t.modifiers.age_decay.steps[j].pct = Number(e.target.value) })} /> % off
+                  <button className="small" onClick={() => setTier(i, (t) => { t.modifiers.age_decay.steps.splice(j, 1) })}>Remove</button>
+                </div>
+              ))}
+              <button className="small" onClick={() => setTier(i, (t) => {
+                const steps = t.modifiers.age_decay.steps
+                steps.push({ days: Math.max(0, ...steps.map((s) => s.days)) + 30, pct: 5 })
+              })}>+ Add age step</button>
+              <button className="small" onClick={() => setTier(i, (t) => {
+                const now = new Date()
+                t.modifiers.age_decay = {
+                  anchor: now.getFullYear() + '-' + String(now.getMonth() + 1).padStart(2, '0') + '-' + String(now.getDate()).padStart(2, '0'),
+                  steps: [{ days: 30, pct: 5 }, { days: 60, pct: 10 }, { days: 120, pct: 20 }, { days: 240, pct: 30 }],
+                }
+              })}>Start today with suggested ladder</button>
 
               <h3 style={{ marginTop: 16 }}>Offset by platform</h3>
               {meta.marketplaces.map((mk) => (
@@ -211,14 +240,21 @@ export default function PricingPage() {
       <div className="panel">
         <h3 style={{ marginTop: 0 }}>Reprice {game} inventory</h3>
         <div className="row center">
-          <Field label="Platform"><select value={repriceMk} onChange={(e) => setRepriceMk(e.target.value)}>
+          <Field label="Platform"><select value={repriceMk} onChange={(e) => { setRepriceMk(e.target.value); setSim(null) }}>
             {meta.marketplaces.map((m) => <option key={m}>{m}</option>)}</select></Field>
-          <button onClick={simulate} disabled={busy}>{busy ? 'Working…' : 'Simulate (preview)'}</button>
-          <button className="danger" onClick={apply} disabled={busy}>Reprice now</button>
-          <span className="muted">Manual trigger only — nothing reprices on a schedule.</span>
+          <label><input type="checkbox" checked={ignoreOverrides}
+            onChange={(e) => { setIgnoreOverrides(e.target.checked); setSim(null) }} /> ignore manual overrides</label>
+          <button onClick={simulate} disabled={busy || unsaved}>{busy ? 'Working…' : 'Simulate (preview)'}</button>
+          <button className="danger" onClick={apply} disabled={busy || unsaved}>Reprice now</button>
+          <span className="muted">{unsaved ? 'Save your rule changes before simulating or repricing.' : 'Manual trigger only.'}</span>
+          {repriceMk === 'tcgplayer' && <button disabled={busy} onClick={() => download('/api/exports/inventory', {
+            layout: 'tcgplayer', format: 'csv', filter: { game }, exclude_zero: true,
+          }).then((r) => ok(`Pricing CSV: ${r.rows} rows; ${r.skipped} skipped without a learned SKU or price. Resolve these in Cycle Counts.`)).catch(err)}>Export pricing CSV</button>}
         </div>
       </div>
 
+      <p className="muted">Ignoring overrides leaves them stored. Clear selected item overrides in Inventory → Bulk edit to resume normal repricing.
+        Clear per-card fixed prices under Scope overrides. For TCGplayer, reconcile quantities in Cycle Counts first; the pricing CSV changes prices only.</p>
       {sim && (
         <div className="panel">
           <div className="row center">
@@ -227,10 +263,12 @@ export default function PricingPage() {
               onChange={(e) => setSimLargeOnly(e.target.checked)} /> large moves only</label>
           </div>
           <div className="table-wrap" style={{ maxHeight: 500, overflowY: 'auto' }}>
-            <table><thead><tr><th>Item</th><th>Current</th><th>New</th><th>Move</th><th>Status</th><th>Trace</th></tr></thead>
+            <table><thead><tr><th>Item</th><th>Age / effective</th><th>Stored override</th><th>Current</th><th>New</th><th>Move</th><th>Status</th><th>Trace</th></tr></thead>
               <tbody>{shownSim.map((r) => (
                 <tr key={r.inventory_id}>
                   <td>{r.description}</td>
+                  <td>{r.age_days ?? '—'} / {r.age_days_effective ?? '—'} days</td>
+                  <td>{r.had_override ? fmtMoney(r.override_price) : '—'}</td>
                   <td>{fmtMoney(r.old_price)}</td>
                   <td>{fmtMoney(r.new_price)}</td>
                   <td>{r.move_pct !== null && <span className={`badge ${r.large_move ? 'red' : 'green'}`}>{r.move_pct > 0 ? '+' : ''}{r.move_pct}%</span>}</td>
@@ -244,10 +282,11 @@ export default function PricingPage() {
   )
 }
 
-function ModTable({ title, keys, table, onChange, dflt = '' }) {
+function ModTable({ title, hint, keys, table, onChange, dflt = '' }) {
   return (
     <div>
       <h3>{title}</h3>
+      {hint && <p className="muted" style={{ maxWidth: 210 }}>{hint}</p>}
       {keys.map((k) => (
         <div className="row center" key={k} style={{ marginBottom: 3 }}>
           <span style={{ width: 90, fontSize: 12 }}>{k}</span>

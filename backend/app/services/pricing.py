@@ -16,7 +16,7 @@ document per game (PricingConfig.config):
          "condition": {"NM": 100, "LP": 85, "MP": 70, "HP": 50, "DMG": 30},
          "printing":  {"normal": 100, "foil": 110},
          "language":  {"en": 100, "ja": 50},
-         "age_decay": {"days": 30, "pct": 5}},   # >= days in stock -> x(100-pct)%
+         "age_decay": {"anchor": null, "steps": [{"days": 30, "pct": 5}]}},
 
       "offsets": {                 # applied AFTER modifiers, one per platform
          "ebay":      {"pct": 0, "flat": 0},
@@ -41,14 +41,17 @@ Computation order for one item on one platform:
   platform offset -> guards (max-move, tier-lock, floors) -> rounding ->
   marketplace-imposed minimum.
 
-Per-item overrides on the InventoryItem (price_override / price_floor) still win
-and can be set from the Inventory page.
+Fixed prices can be bypassed explicitly with ignore_overrides without deleting
+them. Floors remain authoritative. Both can be set from the Inventory page.
 """
+import copy
+from datetime import date, datetime, timezone
+
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from ..domain import (
-    CATEGORY_TO_GAME, MARKETPLACES, MARKETPLACE_MIN_PRICE, bulk_grades_for,
+    CATEGORY_TO_GAME, MARKETPLACES, MARKETPLACE_MIN_PRICE, PRINTING_SUBTYPES, bulk_grades_for,
 )
 from ..models import InventoryItem, PriceData, PricingConfig
 from . import inventory as inv_svc
@@ -73,7 +76,7 @@ DEFAULT_CONFIG = {
             "modifiers": {
                 "condition": {"NM": 100, "LP": 85, "MP": 70, "HP": 50, "DMG": 30},
                 "printing": {}, "language": {},
-                "age_decay": {"days": 0, "pct": 0},
+                "age_decay": {"anchor": None, "steps": []},
             },
             "offsets": _default_offsets(),
             "guards": {
@@ -107,6 +110,7 @@ def get_config(db: Session, game: str) -> dict:
 def _upgrade_config(config: dict) -> dict:
     """Fill in any keys a hand-saved / older config might be missing so the
     engine never KeyErrors on a partial document."""
+    config = copy.deepcopy(config)
     config.setdefault("sources", list(DEFAULT_CONFIG["sources"]))
     # A pre-redesign config stored sources as {"enabled": [...]} — flatten it.
     if isinstance(config["sources"], dict):
@@ -116,7 +120,13 @@ def _upgrade_config(config: dict) -> dict:
         tier["modifiers"].setdefault("condition", {})
         tier["modifiers"].setdefault("printing", {})
         tier["modifiers"].setdefault("language", {})
-        tier["modifiers"].setdefault("age_decay", {"days": 0, "pct": 0})
+        decay = tier["modifiers"].setdefault("age_decay", {"anchor": None, "steps": []})
+        if "steps" not in decay:
+            decay["steps"] = ([{"days": decay.get("days", 0), "pct": decay.get("pct", 0)}]
+                              if decay.get("days") and decay.get("pct") else [])
+        decay.setdefault("anchor", None)
+        decay.pop("days", None)
+        decay.pop("pct", None)
         tier.setdefault("offsets", _default_offsets())
         for mk in MARKETPLACES:
             tier["offsets"].setdefault(mk, {"pct": 0.0, "flat": 0.0})
@@ -137,12 +147,11 @@ def _price_rows(db: Session, product_id: int) -> list[PriceData]:
     ).scalars().all()
 
 
-def _pick_price_row(rows: list[PriceData], printing: str) -> PriceData:
-    """Choose the Normal vs Foil price row for a printing (same coarse rule as
-    ``base_price``: holo/foil/reverse read the non-Normal row when present)."""
-    want_foil = printing not in ("normal", "first_edition")
-    matched = [r for r in rows if (r.sub_type.lower() != "normal") == want_foil]
-    return matched[0] if matched else rows[0]
+def _pick_price_row(rows: list[PriceData], printing: str) -> PriceData | None:
+    """Use the most specific supported subtype, independent of row order."""
+    by_type = {r.sub_type.casefold(): r for r in rows}
+    return next((by_type[s.casefold()] for s in PRINTING_SUBTYPES.get(printing, ())
+                 if s.casefold() in by_type), None)
 
 
 def _market_from_rows(rows: list[PriceData], printing: str) -> float | None:
@@ -262,11 +271,7 @@ def base_price(db: Session, item: InventoryItem, config: dict, trace: list) -> f
     rows = _price_rows(db, item.card.tcgplayer_product_id)
     if not rows:
         return None
-    # Coarse foil/normal price-row selection: "normal" and "first_edition" read
-    # the Normal row, holo/foil/reverse read the non-Normal (foil) row if present.
-    want_foil = item.printing not in ("normal", "first_edition")
-    matched = [r for r in rows if (r.sub_type.lower() != "normal") == want_foil]
-    row = matched[0] if matched else rows[0]
+    row = _pick_price_row(rows, item.printing)
 
     for src in config.get("sources", []):
         field = SOURCE_FIELDS.get(src)
@@ -274,7 +279,7 @@ def base_price(db: Session, item: InventoryItem, config: dict, trace: list) -> f
             continue
         v = getattr(row, field, None)
         if v is not None and v > 0:
-            trace.append(f"base {v:.2f} from {src}")
+            trace.append(f"base {v:.2f} from {src} [{row.sub_type}]")
             return v
     return None
 
@@ -323,15 +328,27 @@ def apply_rounding(price: float, rule: str) -> float:
     return round(price, 2)
 
 
+def effective_age(age: int | None, decay: dict) -> int | None:
+    if age is None or not decay.get("anchor"):
+        return age
+    elapsed = max(0, (datetime.now(timezone.utc).date() - date.fromisoformat(decay["anchor"])).days)
+    return min(age, elapsed)
+
+
 def _age_factor(db: Session, item: InventoryItem, decay: dict, trace: list) -> float:
-    days = decay.get("days")
-    pct = decay.get("pct")
-    if not days or not pct:
-        return 1.0
     age = inv_svc.inventory_age_days(db, item)
-    if age is not None and age >= days:
-        trace.append(f"age {age}d >= {days}d: x{100 - pct}%")
-        return (100 - pct) / 100.0
+    effective = effective_age(age, decay)
+    if age is None:
+        trace.append("age unknown: no decay")
+        return 1.0
+    label = f"age {age}d" + (f" (anchored {effective}d)" if decay.get("anchor") else "")
+    steps = decay.get("steps", [])
+    eligible = [s for s in steps if effective >= s["days"]]
+    if eligible:
+        step = max(eligible, key=lambda s: s["days"])
+        trace.append(f"{label} >= {step['days']}d: x{100 - step['pct']}%")
+        return (100 - step["pct"]) / 100.0
+    trace.append(f"{label}: no step")
     return 1.0
 
 
@@ -343,7 +360,7 @@ def _current_platform_price(item: InventoryItem, marketplace: str) -> float | No
 
 
 def price_item(db: Session, item: InventoryItem, marketplace: str,
-               config: dict | None = None) -> dict:
+               config: dict | None = None, ignore_overrides: bool = False) -> dict:
     """Compute the price for one inventory item on one platform.
 
     Returns {price, marketplace_price, base, trace, status} where status is
@@ -359,7 +376,7 @@ def price_item(db: Session, item: InventoryItem, marketplace: str,
     trace: list[str] = []
 
     # Per-item manual override (fixed price / do-not-reprice) — set from Inventory.
-    if item.price_override is not None:
+    if item.price_override is not None and not ignore_overrides:
         return {"price": item.price_override,
                 "marketplace_price": max(item.price_override, mp_min),
                 "base": item.price_override,
@@ -368,7 +385,7 @@ def price_item(db: Session, item: InventoryItem, marketplace: str,
     # Per-card fixed price override
     card_ov = config.get("card_overrides", {}).get(
         str(item.catalog_card_id)) if item.catalog_card_id else None
-    if card_ov and card_ov.get("fixed_price") is not None:
+    if card_ov and card_ov.get("fixed_price") is not None and not ignore_overrides:
         p = float(card_ov["fixed_price"])
         return {"price": p, "marketplace_price": max(p, mp_min), "base": p,
                 "trace": ["per-card fixed price"], "status": "override"}
@@ -385,7 +402,9 @@ def price_item(db: Session, item: InventoryItem, marketplace: str,
         return {"price": None, "marketplace_price": None, "base": None,
                 "trace": ["no price source data"], "status": "no_source"}
 
-    current = tiering_price(db, item, base)
+    current = _current_platform_price(item, marketplace)
+    if current is None:
+        current = base if ignore_overrides else tiering_price(db, item, base)
     tier = find_tier(config, current)
     trace.append(f"tier '{tier.get('name', '?')}' (current {current:.2f})")
     price = base
@@ -464,19 +483,27 @@ def price_item(db: Session, item: InventoryItem, marketplace: str,
 
 
 def simulate(db: Session, marketplace: str, items: list[InventoryItem],
-             large_move_pct: float = 25.0) -> list[dict]:
+             large_move_pct: float = 25.0, ignore_overrides: bool = False) -> list[dict]:
     """Preview repricing without committing (Section 5 simulation mode)."""
     out = []
     for item in items:
-        result = price_item(db, item, marketplace)
+        config = get_config(db, item.card.game) if item.card else default_config()
+        result = price_item(db, item, marketplace, config, ignore_overrides)
         old = _current_platform_price(item, marketplace)
         new = result["marketplace_price"]
-        move_pct = round((new - old) / old * 100, 1) if old and new else None
+        move_pct = round((new - old) / old * 100, 1) if old and new is not None else None
+        fixed = config.get("card_overrides", {}).get(str(item.catalog_card_id), {}).get("fixed_price")
+        override = item.price_override if item.price_override is not None else fixed
+        age = inv_svc.inventory_age_days(db, item)
+        current = old if old is not None else (result["base"] or 0)
+        decay = find_tier(config, current).get("modifiers", {}).get("age_decay", {})
         out.append({
             "inventory_id": item.id,
             "description": inv_svc.item_description(item),
             "old_price": old, "new_price": new,
             "internal_price": result["price"],
+            "had_override": override is not None, "override_price": override,
+            "age_days": age, "age_days_effective": effective_age(age, decay),
             "move_pct": move_pct,
             "large_move": move_pct is not None and abs(move_pct) >= large_move_pct,
             "status": result["status"], "trace": result["trace"],
@@ -484,11 +511,12 @@ def simulate(db: Session, marketplace: str, items: list[InventoryItem],
     return out
 
 
-def apply_reprice(db: Session, marketplace: str, items: list[InventoryItem]) -> dict:
+def apply_reprice(db: Session, marketplace: str, items: list[InventoryItem],
+                  ignore_overrides: bool = False) -> dict:
     """Commit new prices: updates listing target prices and marks them dirty."""
     updated = skipped = 0
     for item in items:
-        result = price_item(db, item, marketplace)
+        result = price_item(db, item, marketplace, ignore_overrides=ignore_overrides)
         if result["status"] in ("no_source", "suppressed") or result["marketplace_price"] is None:
             skipped += 1
             continue

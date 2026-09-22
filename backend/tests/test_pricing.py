@@ -199,3 +199,101 @@ def test_rounding_rules():
     assert pricing.apply_rounding(10.40, "1") == 10.0
     assert pricing.apply_rounding(0.40, "0.99") == 0.99
     assert pricing.apply_rounding(10.373, "0.01") == 10.37
+
+
+def test_printing_subtypes_are_specific_and_order_independent(db, card):
+    from app.models import PriceData
+    db.add_all([
+        PriceData(tcgplayer_product_id=111, sub_type="Reverse Holofoil", market=7),
+        PriceData(tcgplayer_product_id=111, sub_type="Holofoil", market=18),
+        PriceData(tcgplayer_product_id=111, sub_type="1st Edition", market=30),
+    ])
+    db.commit()
+    rows = pricing._price_rows(db, 111)
+    assert pricing._pick_price_row(list(reversed(rows)), "reverse_holo").market == 7
+    assert pricing._pick_price_row(rows, "holo").market == 18
+    assert pricing._pick_price_row(rows, "first_edition").market == 30
+    item = make_item(db, card, printing="reverse_holo")
+    result = pricing.price_item(db, item, "tcgplayer", cfg())
+    assert result["base"] == 7 and "[Reverse Holofoil]" in result["trace"][0]
+
+
+def test_missing_printing_does_not_use_arbitrary_foil(db, card):
+    item = make_item(db, card, printing="reverse_holo")
+    assert pricing.price_item(db, item, "tcgplayer", cfg())["status"] == "no_source"
+
+
+def test_legacy_age_config_upgrades_without_mutation(db, card):
+    from datetime import datetime, timedelta, timezone
+    item = make_item(db, card)
+    inv._fifo_batches(db, item)[0].acquired_at = datetime.now(timezone.utc) - timedelta(days=95)
+    config = cfg()
+    config["tiers"][0]["modifiers"]["age_decay"] = {"days": 30, "pct": 15}
+    assert pricing.price_item(db, item, "tcgplayer", config)["price"] == 8.5
+    assert config["tiers"][0]["modifiers"]["age_decay"] == {"days": 30, "pct": 15}
+
+
+def test_age_ladder_uses_highest_reached_step_and_anchor(db, card):
+    from datetime import datetime, timedelta, timezone
+    item = make_item(db, card)
+    now = datetime.now(timezone.utc)
+    inv._fifo_batches(db, item)[0].acquired_at = now - timedelta(days=125)
+    config = cfg()
+    decay = {"anchor": None, "steps": [
+        {"days": 120, "pct": 20}, {"days": 30, "pct": 5}, {"days": 60, "pct": 10}]}
+    config["tiers"][0]["modifiers"]["age_decay"] = decay
+    assert pricing.price_item(db, item, "tcgplayer", config)["price"] == 8
+    decay["anchor"] = now.date().isoformat()
+    result = pricing.price_item(db, item, "tcgplayer", config)
+    assert result["price"] == 10 and any("anchored 0d" in t for t in result["trace"])
+    decay["anchor"] = (now - timedelta(days=65)).date().isoformat()
+    assert pricing.price_item(db, item, "tcgplayer", config)["price"] == 9
+    assert pricing.effective_age(2, decay) == 2
+    assert pricing.effective_age(None, decay) is None
+
+
+def test_ignored_item_and_card_overrides_preserve_floors_and_suppression(db, card):
+    item = make_item(db, card)
+    item.price_override = 80
+    item.price_floor = 12
+    config = cfg()
+    config["card_overrides"][str(card.id)] = {"fixed_price": 70}
+    assert pricing.price_item(db, item, "tcgplayer", config, ignore_overrides=True)["price"] == 12
+    item.price_override = None
+    assert pricing.price_item(db, item, "tcgplayer", config)["price"] == 70
+    assert pricing.price_item(db, item, "tcgplayer", config, ignore_overrides=True)["price"] == 12
+    config["set_overrides"]["MH3"] = {"suppress": True}
+    assert pricing.price_item(db, item, "tcgplayer", config, ignore_overrides=True)["status"] == "suppressed"
+
+
+def test_simulation_reports_true_and_effective_age(db, card):
+    from datetime import datetime, timedelta, timezone
+    from app.models import PricingConfig
+    item = make_item(db, card)
+    now = datetime.now(timezone.utc)
+    inv._fifo_batches(db, item)[0].acquired_at = now - timedelta(days=95)
+    config = cfg()
+    config["tiers"][0]["modifiers"]["age_decay"] = {
+        "anchor": now.date().isoformat(), "steps": [{"days": 30, "pct": 5}]}
+    db.add(PricingConfig(game="mtg", config=config))
+    db.commit()
+    result = pricing.simulate(db, "tcgplayer", [item])[0]
+    assert result["age_days"] == 95 and result["age_days_effective"] == 0
+
+
+def test_age_config_validation_rejects_invalid_inputs(db):
+    import pytest
+    from fastapi import HTTPException
+    from app.routers.pricing import put_config
+    invalid = [
+        {"anchor": "not-a-date", "steps": []},
+        {"anchor": None, "steps": [{"days": 1.5, "pct": 10}]},
+        {"anchor": None, "steps": [{"days": 30, "pct": 101}]},
+        {"anchor": None, "steps": [{"days": 30, "pct": 5}, {"days": 30, "pct": 10}]},
+        {"anchor": None, "steps": "wrong"},
+    ]
+    for decay in invalid:
+        config = cfg()
+        config["tiers"][0]["modifiers"]["age_decay"] = decay
+        with pytest.raises(HTTPException):
+            put_config("mtg", config, db)

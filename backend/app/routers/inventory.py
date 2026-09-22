@@ -1,5 +1,5 @@
 """Inventory: filtering, adjustments, bulk edit, splits, merges, cycle counts."""
-from fastapi import APIRouter, Body, Depends, HTTPException
+from fastapi import APIRouter, Body, Depends, HTTPException, UploadFile, File
 from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
@@ -11,6 +11,7 @@ from ..models import (
 from ..validate import choice, mapping, money, whole
 from ..services import inventory as inv_svc
 from ..services import pricing
+from ..services import tcg_counts
 from ..services import reports as report_svc
 from .serializers import inventory_dict
 
@@ -518,6 +519,52 @@ def global_log(type: str = "", cause: str = "", q: str = "", limit: int = 500,
 
 # --- Cycle counts ------------------------------------------------------------
 
+@router.post("/cycle-counts/tcgplayer/upload")
+async def upload_tcg_count(file: UploadFile = File(...), db: Session = Depends(get_db)):
+    data = await file.read(10 * 1024 * 1024 + 1)
+    if len(data) > 10 * 1024 * 1024:
+        raise HTTPException(400, "CSV must be smaller than 10 MB")
+    count = tcg_counts.create_count(db, data, file.filename or "TCGplayer.csv")
+    return {"count_id": count.id}
+
+
+def _csv_count(db, count_id):
+    count = db.get(CycleCount, count_id)
+    if not count or count.source != "tcgplayer":
+        raise HTTPException(404, "CSV count not found")
+    return count
+
+
+@router.patch("/cycle-counts/{count_id}/tcg-lines/{line_id}")
+def patch_tcg_line(count_id: int, line_id: int, payload: dict = Body(...), db: Session = Depends(get_db)):
+    count = _csv_count(db, count_id)
+    tcg_counts.patch_line(db, count, line_id, payload)
+    return tcg_counts.view(db, count)
+
+
+@router.post("/cycle-counts/{count_id}/rematch")
+def rematch_tcg_count(count_id: int, db: Session = Depends(get_db)):
+    count = _csv_count(db, count_id)
+    tcg_counts.rematch(db, count)
+    return tcg_counts.view(db, count)
+
+
+@router.get("/cycle-counts/{count_id}/corrections")
+def export_tcg_corrections(count_id: int, db: Session = Depends(get_db)):
+    from .exports import _respond
+    headers, rows = tcg_counts.correction_export(db, _csv_count(db, count_id))
+    return _respond(headers, rows, "csv", f"tcg-quantity-corrections-{count_id}")
+
+
+@router.post("/cycle-counts/{count_id}/corrections-uploaded")
+def mark_tcg_corrections_uploaded(count_id: int, db: Session = Depends(get_db)):
+    count = _csv_count(db, count_id)
+    if count.status != "completed":
+        raise HTTPException(409, "Approve the count first")
+    count.source_data = {**count.source_data, "corrections_uploaded": True}
+    db.commit()
+    return tcg_counts.view(db, count)
+
 @router.post("/cycle-counts")
 def start_cycle_count(payload: dict = Body(...), db: Session = Depends(get_db)):
     bin_name = payload.get("bin", "")
@@ -538,10 +585,12 @@ def start_cycle_count(payload: dict = Body(...), db: Session = Depends(get_db)):
 @router.get("/cycle-counts/list")
 def list_cycle_counts(db: Session = Depends(get_db)):
     counts = db.execute(select(CycleCount).order_by(CycleCount.id.desc())).scalars().all()
-    return [{"id": c.id, "bin": c.bin, "status": c.status,
+    return [{"id": c.id, "bin": c.bin, "status": c.status, "source": c.source,
+             "filename": (c.source_data or {}).get("filename"),
              "created_at": c.created_at.isoformat() if c.created_at else None,
-             "lines": len(c.lines),
-             "counted": sum(1 for l in c.lines if l.counted is not None)}
+             "lines": len(c.source_data["lines"]) if c.source == "tcgplayer" else len(c.lines),
+             "counted": sum(bool(l.get("resolution")) for l in c.source_data["lines"])
+             if c.source == "tcgplayer" else sum(1 for l in c.lines if l.counted is not None)}
             for c in counts]
 
 
@@ -550,6 +599,8 @@ def get_cycle_count(count_id: int, db: Session = Depends(get_db)):
     count = db.get(CycleCount, count_id)
     if not count:
         raise HTTPException(404)
+    if count.source == "tcgplayer":
+        return tcg_counts.view(db, count)
     lines = []
     for l in count.lines:
         status = ("uncounted" if l.counted is None
@@ -572,6 +623,8 @@ def update_count_line(line_id: int, payload: dict = Body(...),
     line = db.get(CycleCountLine, line_id)
     if not line:
         raise HTTPException(404)
+    if line.count.status != "in_progress":
+        raise HTTPException(409, "This count is no longer editable")
     # default=None: clearing a tally back to uncounted (red) is a valid edit.
     line.counted = whole(payload.get("counted"), "counted", default=None)
     db.commit()
@@ -585,6 +638,10 @@ def approve_cycle_count(count_id: int, db: Session = Depends(get_db)):
     count = db.get(CycleCount, count_id)
     if not count:
         raise HTTPException(404)
+    if count.source == "tcgplayer":
+        return tcg_counts.approve(db, count)
+    if count.status != "in_progress":
+        raise HTTPException(409, "This count is no longer editable")
     adjusted = 0
     for line in count.lines:
         if line.counted is None or line.counted == line.expected:

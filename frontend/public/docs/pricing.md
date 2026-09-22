@@ -12,7 +12,7 @@ For a game you define:
 
 An ordered list of price sources: TCG Market, TCG Mid, TCG Low, TCG Direct Low.
 The engine walks the list top-to-bottom and uses the **first source that has a
-value**. So `[Market → Mid → Low]` means "use Market; if there's no market
+value for the card's printing**. Foil, holo and reverse-holo prices come from their own price rows; missing finishes are reported as no source, never chosen by row order. So `[Market → Mid → Low]` means "use Market; if there's no market
 price, fall back to Mid; then Low."
 
 ### 2. Tiers (bands of the card's current price)
@@ -30,9 +30,9 @@ age-decay factor are all percentages that multiply together:
 ```
 final (pre-guards) = base
                    × condition%    (e.g. LP 85%)
-                   × printing%
+                   × extra printing%
                    × language%     (e.g. JP 50%)
-                   × age factor     (in stock ≥ N days → reduce X%)
+                   × age factor     (highest reached ladder step)
 ```
 
 Example: an **LP, Japanese** card, base $10, with LP = 85%, JP = 50%:
@@ -77,12 +77,56 @@ Rules are the default. Any individual card can override them from the
   "do not auto-reprice this card" switch.
 - **Price floor** — a per-item minimum the rules can't go under.
 
+## Age ladder and clock start
+
+Each tier has an editable list of day thresholds and percentage reductions.
+Only the highest reached threshold applies; steps do not compound. For example,
+30 days → 5%, 60 → 10%, 120 → 20%, 240 → 30%.
+
+The optional **Clock starts** date caps the age used for decay:
+`min(actual acquisition age, days since clock start)`. Set it to the day you
+begin using pricing to grandfather migrated stock. Newer acquisitions retain
+their younger age. A blank clock date uses true acquisition age. No acquisition
+history means no age reduction. Future clock dates hold effective age at zero.
+
+**Start today with suggested ladder** fills today's date and those four steps
+for that tier. Save the rules before simulating. Existing single-step settings
+are converted without changing their meaning; existing disabled decay stays
+disabled until you configure it.
+
+Simulation shows both actual and effective age. Repricing never resets the
+clock. Max movement still uses the current platform price, so the initial
+baseline should come from your reviewed TCGplayer CSV.
+
+## Printing modifiers
+
+**Extra printing %** is an additional multiplier on a baseline that already
+reflects the finish. Leave it blank (100%) unless you want an extra adjustment.
+The trace names the price subtype used.
+
 ## Simulate before you commit
 
 On the Pricing page, pick a platform and hit **Simulate** to preview every
 card's old vs new price with a full trace of how it was computed. Cards moving
 by more than the *large-move flag %* (Settings) get a red badge so mistakes are
-obvious. When it looks right, **Reprice now** commits it.
+obvious. Save edited rules first. When it looks right, **Reprice now** commits it.
+
+**Ignore manual overrides** applies to both Simulate and Reprice. It bypasses
+item fixed prices and advanced per-card fixed prices, while preserving floors
+and set suppression. The table shows the stored override beside the current
+platform price and proposed price.
+
+Repricing with this switch never deletes overrides. Clear selected item
+overrides deliberately through Inventory → Bulk edit; remove advanced fixed
+prices under Scope overrides. A later reprice with the switch off respects
+those retained overrides again.
+
+For TCGplayer, use Cycle Counts to reconcile first, then Simulate → Reprice →
+**Export pricing CSV**. The file uses the applied TCGplayer target price and
+zero quantity deltas, including when you ignored an override for that run.
+Only learned SKU identities with a price are exported; the download message
+reports omitted rows. Complete their matches in Cycle Counts before pricing
+them on TCGplayer.
 
 ## Scope overrides (advanced)
 

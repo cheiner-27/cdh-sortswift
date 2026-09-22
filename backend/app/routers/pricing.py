@@ -8,6 +8,7 @@ from ..domain import GAMES
 from ..models import PricingConfig
 from ..services import pricing as pricing_svc
 from ..services.settings import get_setting
+from ..validate import mapping, money, whole
 from .inventory import filter_items
 
 router = APIRouter(prefix="/api/pricing", tags=["pricing"])
@@ -24,6 +25,27 @@ def get_config(game: str, db: Session = Depends(get_db)):
 def put_config(game: str, config: dict = Body(...), db: Session = Depends(get_db)):
     if game not in GAMES:
         raise HTTPException(404, "unknown game")
+    from datetime import date
+    for tier in config.get("tiers", []):
+        decay = mapping(tier.get("modifiers", {}).get("age_decay", {}), "age_decay")
+        anchor = decay.get("anchor")
+        if anchor:
+            try:
+                date.fromisoformat(anchor)
+            except (ValueError, TypeError):
+                raise HTTPException(400, "age clock start must be a date (YYYY-MM-DD)")
+        steps = decay.get("steps", [decay] if decay.get("days") else [])
+        if not isinstance(steps, list):
+            raise HTTPException(400, "age steps must be a list")
+        seen = set()
+        for step in steps:
+            mapping(step, "age step")
+            step["days"] = whole(step.get("days"), "age step days")
+            step["pct"] = money(step.get("pct"), "age reduction %", max_value=100)
+            if step["days"] in seen:
+                raise HTTPException(400, "age steps must have different day thresholds")
+            seen.add(step["days"])
+    config = pricing_svc._upgrade_config(config)
     # tiers must be non-overlapping bands; only the last may be open-ended
     tiers = sorted(config.get("tiers", []), key=lambda t: t.get("min") or 0)
     for a, b in zip(tiers, tiers[1:]):
@@ -48,7 +70,8 @@ def simulate(marketplace: str, payload: dict = Body(default={}),
     items = filter_items(db, {**payload.get("filter", {}), "in_stock_only": True})
     results = pricing_svc.simulate(
         db, marketplace, items,
-        large_move_pct=float(get_setting(db, "large_move_pct")))
+        large_move_pct=float(get_setting(db, "large_move_pct")),
+        ignore_overrides=_ignore_overrides(payload))
     return {"count": len(results), "results": results}
 
 
@@ -57,7 +80,15 @@ def apply(marketplace: str, payload: dict = Body(default={}),
           db: Session = Depends(get_db)):
     """Manual reprice trigger (no scheduler by design)."""
     items = filter_items(db, {**payload.get("filter", {}), "in_stock_only": True})
-    return pricing_svc.apply_reprice(db, marketplace, items)
+    return pricing_svc.apply_reprice(db, marketplace, items,
+                                     ignore_overrides=_ignore_overrides(payload))
+
+
+def _ignore_overrides(payload: dict) -> bool:
+    value = payload.get("ignore_overrides", False)
+    if not isinstance(value, bool):
+        raise HTTPException(400, "ignore_overrides must be true or false")
+    return value
 
 
 @router.post("/preview-item/{marketplace}/{item_id}")

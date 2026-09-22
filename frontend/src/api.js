@@ -40,7 +40,11 @@ export async function download(url, body) {
     headers: body === undefined ? {} : { 'Content-Type': 'application/json' },
     body: body === undefined ? undefined : JSON.stringify(body),
   })
-  if (!res.ok) throw new Error('download failed: ' + res.statusText)
+  if (!res.ok) {
+    let detail = res.statusText
+    try { detail = (await res.json()).detail || detail } catch { /* no JSON body */ }
+    throw new Error(typeof detail === 'string' ? detail : JSON.stringify(detail))
+  }
   const blob = await res.blob()
   const cd = res.headers.get('content-disposition') || ''
   const m = cd.match(/filename="?([^";]+)"?/)
@@ -49,6 +53,8 @@ export async function download(url, body) {
   a.download = m ? m[1] : 'export.csv'
   a.click()
   URL.revokeObjectURL(a.href)
+  return { rows: Number(res.headers.get('X-Export-Rows') || 0),
+    skipped: Number(res.headers.get('X-Export-Skipped') || 0) }
 }
 
 export const fmtMoney = (v) =>

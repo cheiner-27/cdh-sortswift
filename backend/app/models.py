@@ -114,6 +114,19 @@ class CatalogCard(Base):
     )
 
 
+class TcgCatalogGroup(Base):
+    """Cached TCGplayer names/numbers, alongside the primary card catalog."""
+    __tablename__ = "tcg_catalog_groups"
+    game: Mapped[str] = mapped_column(String, primary_key=True)
+    group_id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    name: Mapped[str] = mapped_column(String)
+    name_norm: Mapped[str] = mapped_column(String, index=True)
+    abbreviation: Mapped[str | None] = mapped_column(String, nullable=True)
+    products: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    groups_updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    products_updated_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+
 class PriceData(Base):
     """Market prices pulled from TCGcsv (TCGplayer price feed)."""
     __tablename__ = "price_data"
@@ -304,6 +317,7 @@ class MarketplaceListing(Base):
     ebay_offer_id: Mapped[str | None] = mapped_column(String, nullable=True)
     ebay_listing_id: Mapped[str | None] = mapped_column(String, nullable=True)
     tcg_sku_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    tcg_metadata: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     error_code: Mapped[str | None] = mapped_column(String, nullable=True)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
     dirty: Mapped[bool] = mapped_column(Boolean, default=True)  # changed since last sync
@@ -421,6 +435,8 @@ class CycleCount(Base):
     __tablename__ = "cycle_counts"
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     bin: Mapped[str] = mapped_column(String, index=True)
+    source: Mapped[str] = mapped_column(String, default="physical")
+    source_data: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     status: Mapped[str] = mapped_column(String, default="in_progress")  # in_progress | completed | abandoned
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
     completed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)

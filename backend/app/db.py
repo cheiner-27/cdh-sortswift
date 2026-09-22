@@ -49,12 +49,29 @@ def ensure_schema() -> None:
     is idempotent and safe to run on every startup.
     """
     from sqlalchemy import inspect, text
-    from .models import PricingConfig, collector_number_key, name_key
+    from .models import PricingConfig, TcgCatalogGroup, collector_number_key, name_key
+
+    TcgCatalogGroup.__table__.create(engine, checkfirst=True)
 
     insp = inspect(engine)
     tables = set(insp.get_table_names())
     if not tables:
         return  # fresh DB: create_all already built the current schema
+
+    # CSV cycle counts retain unresolved source rows as review data. Existing
+    # physical counts and their lines stay intact.
+    additions = {
+        "tcg_catalog_groups": {"abbreviation": "VARCHAR"},
+        "cycle_counts": {"source": "VARCHAR DEFAULT 'physical'", "source_data": "JSON"},
+        "marketplace_listings": {"tcg_metadata": "JSON"},
+    }
+    for table, columns in additions.items():
+        if table in tables:
+            existing = {c["name"] for c in insp.get_columns(table)}
+            with engine.begin() as conn:
+                for column, definition in columns.items():
+                    if column not in existing:
+                        conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {column} {definition}"))
 
     # 1) catalog_cards.collector_number_norm (numerator matching key)
     if "catalog_cards" in tables:

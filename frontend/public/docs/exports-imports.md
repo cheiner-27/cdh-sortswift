@@ -18,17 +18,25 @@ TCG Low Price, Total Quantity, Add to Quantity, TCG Marketplace Price, Photo URL
 This matches a real export from your TCGplayer account, so you can **re-upload it
 in Seller Hub** to push prices and quantities. Notes:
 
-- Rows must carry a **TCGplayer Id** to match a product — sync your catalog first
-  so each card has one (older Pokémon data lacked it; the current TCGcsv-based
-  sync stores it).
-- **TCG Marketplace Price** carries the price you're setting (your current price
-  or per-item override).
+- **TCGplayer Id** must be the SKU ID learned from an approved CSV in Cycle
+  Counts. Catalog sync supplies a product ID, which cannot be used here.
+  Rows without a learned, unchanged SKU identity or price are excluded; the
+  download message reports the skipped count. Complete their matches first.
+- **TCG Marketplace Price** carries the applied TCGplayer target price. This
+  preserves a deliberate ignore-overrides reprice while leaving the override
+  itself stored for future decisions.
+- Condition includes the finish (for example **Near Mint Foil**), and learned
+  rows retain TCGplayer's exact set and product names.
 - **Add to Quantity** is set to **0** — i.e. re-price only, don't add stock.
   **Total Quantity** reflects your on-hand count.
 - The market/low reference columns are filled from your local price data when
   available (informational).
 
-Workflow: reprice in the app → export TCGplayer layout → upload to TCGplayer.
+Workflow: Cycle Counts → upload current CSV → review each quantity variance →
+approve → download and upload quantity corrections once → verify with a fresh
+TCG export. Then Pricing → simulate → reprice → export pricing CSV → upload to
+TCGplayer. Quantity corrections and price updates are separate files; see
+**Help → Cycle counts** for the full round trip.
 
 ## eBay export
 
@@ -47,7 +55,8 @@ Previously-stocked, now-zero-quantity items — your restock shortlist.
 
 ## CSV import
 
-The **CSV Import** page brings cards *in* (e.g. a TCGplayer export of your
-current listings). Imports land in **Staging** for review, support add /
+The **CSV Import** page brings new stock *in* using mapped columns.
+For comparing current TCGplayer listings against existing inventory, use
+**Cycle Counts → Upload current TCGplayer CSV** instead. Imports land in **Staging** for review, support add /
 overwrite / deduction modes, and have a time-limited one-click undo (window set
 in Settings).

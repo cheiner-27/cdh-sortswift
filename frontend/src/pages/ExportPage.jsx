@@ -71,7 +71,7 @@ export default function ExportPage() {
         <div className="row center">
           <label><input type="checkbox" checked={excludeZero} onChange={(e) => setExcludeZero(e.target.checked)} /> exclude zero-quantity rows</label>
           <label><input type="checkbox" checked={mergeDupes} onChange={(e) => setMergeDupes(e.target.checked)} /> merge duplicate SKUs</label>
-          <button className="primary" onClick={() => download('/api/exports/inventory', body()).catch(err)}>Export inventory</button>
+          <button className="primary" onClick={() => download('/api/exports/inventory', body()).then((r) => ok(`Exported ${r.rows} rows; ${r.skipped} skipped without a learned TCG SKU or price.`)).catch(err)}>Export inventory</button>
           <button onClick={() => download('/api/exports/out-of-stock', { format: fmt }).catch(err)}>Out-of-stock export</button>
         </div>
         {layout === 'tcgplayer' && <p className="muted" style={{ fontSize: 12 }}>
@@ -79,7 +79,7 @@ export default function ExportPage() {
           (TCGplayer Id, Product Line, Set Name, …, Total Quantity, Add to Quantity, TCG Marketplace Price,
           Photo URL). Since there's no TCGplayer API, this is how you push prices/quantities: re-upload it in
           Seller Hub. <b>Add to Quantity</b> is set to 0 (re-price only, don't add stock) and <b>TCG Marketplace
-          Price</b> carries your price. Rows need a TCGplayer Id to match, so sync your catalog first.</p>}
+          Price</b> carries your price. The ID is learned from a reviewed TCGplayer CSV in Cycle Counts. Catalog product IDs are not SKU IDs. Unknown or changed identities and unpriced rows are excluded, with the skipped count shown after download. Quantity corrections are exported separately from the completed cycle count.</p>}
         {layout === 'ebay' && <p className="muted" style={{ fontSize: 12 }}>
           The <b>eBay</b> layout is a simple SKU / title / condition / quantity / price sheet for bulk tools.</p>}
         <Msg msg={msg} />

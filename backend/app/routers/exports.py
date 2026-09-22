@@ -40,7 +40,19 @@ def export_inventory(payload: dict = Body(default={}), db: Session = Depends(get
         exclude_zero=payload.get("exclude_zero", True),
         merge_duplicates=payload.get("merge_duplicates", False),
     )
-    return _respond(headers, rows, payload.get("format", "csv"), "inventory")
+    skipped = 0
+    if payload.get("layout") == "tcgplayer":
+        # Incomplete identities remain visible in Cycle Counts, but cannot form
+        # an uploadable price row. Never put product IDs in their place.
+        eligible = [row for row in rows if row[0] and row[14] != ""]
+        skipped = len(rows) - len(eligible)
+        rows = eligible
+        if not rows:
+            raise HTTPException(400, "No linked, priced TCGplayer rows. Import and approve a current CSV in Cycle Counts first.")
+    response = _respond(headers, rows, payload.get("format", "csv"), "inventory")
+    response.headers["X-Export-Skipped"] = str(skipped)
+    response.headers["X-Export-Rows"] = str(len(rows))
+    return response
 
 
 @router.post("/out-of-stock")

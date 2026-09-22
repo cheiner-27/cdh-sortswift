@@ -495,3 +495,19 @@ This tool does not import pre-existing live marketplace listings — CSV import 
 - **Master quantity is authoritative** — marketplace listing quantities are derived, not independently tracked; reserve quantities and listing caps (Section 6.1) are the tools for holding back stock per channel, not manual quantity edits on each marketplace
 - **Staging as a soft landing zone** — scan and CSV intake default through a review/approve step before live inventory, catching bad OCR reads and bad import mappings before they pollute inventory or push to marketplaces
 - **Every mutation is logged** — the Audit / Adjustment Log (Section 3) and 15-minute undo windows for imports/orders exist because inventory corrections are routine, not exceptional; don't build destructive-only paths where a log-and-undo path is described above
+
+
+## September 2026 workflow update
+
+TCGplayer's Pricing Custom Export now reconciles through source-tagged Cycle
+Counts. Each variance is reviewed individually: accept TCG quantity locally or
+export a signed correction to TCG. Approval learns condition/printing SKU IDs
+and adopts current listed prices; missing rows never zero local stock.
+Quantity corrections are downloaded separately from the later price-only CSV.
+
+Pricing supports a highest-reached-step age ladder and an optional clock start
+date that caps effective acquisition age. Simulate and Reprice can explicitly
+ignore manual fixed prices while preserving their stored values, floors and
+set suppression. Simulation shows the stored override and actual/effective
+ages. Printing-specific source selection is shared with export, and printing
+modifiers are additional adjustments to that already-specific baseline.
