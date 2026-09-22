@@ -74,10 +74,12 @@ export default function InventoryPage() {
   const selFilter = () => ({ ids: [...selected], include_deleted: true })
 
   const mergeDupes = async () => {
-    if (!window.confirm('Merge exact-duplicate rows? This is irreversible.')) return
+    if (!window.confirm('Merge matching rows in the current filter? Language codes such as EN/en are equivalent. Quantities combine; purchase costs and dates stay intact. This is irreversible.')) return
     try {
       const r = await api.post('/api/inventory/merge-duplicates', { filter: cleanFilter() })
-      ok(`Merged ${r.merged_rows} duplicate row(s)`); search()
+      ok(r.merged_rows ? `Merged ${r.merged_rows} duplicate row(s); purchase history preserved.`
+        : 'No matching active duplicates. Check the filter, bin, language, comments, price overrides and listing settings.')
+      search()
     } catch (e) { err(e) }
   }
 

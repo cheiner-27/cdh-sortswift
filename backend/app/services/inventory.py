@@ -9,6 +9,7 @@ from datetime import datetime, timedelta, timezone
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
+from ..domain import normalize_language
 from ..models import (
     AcquisitionLog, FifoConsumption, InventoryItem, InventoryLog,
     MarketplaceListing, utcnow,
@@ -51,16 +52,17 @@ def find_or_create_item(
     condition: str = "NM", printing: str = "normal", language: str = "en", bin: str = "",
 ) -> InventoryItem:
     """Find the inventory record matching this identity+bin, or create it at qty 0."""
+    language = normalize_language(language)
     q = select(InventoryItem).where(
         InventoryItem.catalog_card_id == catalog_card_id,
         InventoryItem.custom_sku_id == custom_sku_id,
         InventoryItem.condition == condition,
         InventoryItem.printing == printing,
-        InventoryItem.language == language,
+        func.lower(func.trim(InventoryItem.language)) == language,
         InventoryItem.bin == bin,
         InventoryItem.deleted == False,  # noqa: E712
     )
-    item = db.execute(q).scalars().first()
+    item = db.execute(q.order_by(InventoryItem.id)).scalars().first()
     if item is None:
         item = InventoryItem(
             catalog_card_id=catalog_card_id, custom_sku_id=custom_sku_id,

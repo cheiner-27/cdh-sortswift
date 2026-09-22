@@ -13,7 +13,7 @@ from datetime import datetime, timedelta, timezone
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from ..domain import normalize_condition, normalize_printing
+from ..domain import normalize_condition, normalize_language, normalize_printing
 from ..models import CatalogCard, ImportBatch, ImportRow, InventoryItem, StagingItem
 from . import inventory as inv_svc
 from .settings import get_setting
@@ -179,7 +179,7 @@ def _apply_row(db: Session, batch: ImportBatch, row: ImportRow, card: CatalogCar
     # re-normalize with the matched card's game: a CSV without a game column
     # can't apply game-specific remaps (e.g. "holo" -> "foil" for MTG) earlier
     printing = normalize_printing(mapped.get("printing", "normal"), card.game)
-    language = mapped.get("language") or "en"
+    language = normalize_language(mapped.get("language") or "en")
     bin_name = mapped.get("bin", "")
     price = None
     if mapped.get("price"):

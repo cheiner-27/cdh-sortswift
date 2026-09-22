@@ -56,8 +56,18 @@ Tick rows, then:
 - **Transfer bin** — move records to a new bin; logged to transfer history.
 - **Delete** — soft delete, restorable via **show deleted**.
 
-**Merge duplicates** collapses rows identical in every field (including bin,
-cost, comment, and listing links) into one. It's irreversible.
+**Merge duplicates** combines active rows with the same card, condition,
+printing, language, bin, comment, price override/floor, and marketplace links
+and settings. Language codes ignore case and surrounding spaces: `EN` and `en`
+are the same language; `en` and `ja` remain separate. New intake reuses an
+existing row even when the incoming language uses different capitalization.
+
+Quantities combine into the oldest record. Its current price is retained;
+each FIFO purchase batch keeps its original cost and date. Different purchase
+costs do not prevent merging because the rows already share a FIFO pool.
+Extra rows are marked deleted and their redundant listing links are removed.
+Historical stock logs remain. The merge is irreversible; it does not buy, sell,
+or change the total number of cards.
 
 ## One record at a time
 

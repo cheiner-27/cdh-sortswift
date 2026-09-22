@@ -90,3 +90,26 @@ def test_value_maps_apply(db, card):
         {"printing": {"shiny": "foil"}, "condition": {"Mint": "NM"}})
     assert mapped["printing"] == "foil"
     assert mapped["condition"] == "NM"
+
+
+def test_csv_language_casing_reuses_existing_inventory(db, card):
+    item = inv.find_or_create_item(db, catalog_card_id=card.id, language="en")
+    inv.add_stock(db, item, 2, 1.0)
+    csv_data = b"ID,Language,Count\ntest-uuid-1, EN ,3\n"
+    batch = importing.run_import(
+        db, filename="language.csv", content=csv_data,
+        mapping={"ID": "external_id", "Language": "language", "Count": "quantity"},
+        value_maps=None, mode="add", to_staging=False)
+    assert batch.status == "completed"
+    assert db.query(InventoryItem).one().id == item.id
+    assert item.quantity == 5
+
+
+def test_csv_staging_stores_canonical_language(db, card):
+    csv_data = b"ID,Language,Count\ntest-uuid-1, EN ,3\n"
+    batch = importing.run_import(
+        db, filename="language.csv", content=csv_data,
+        mapping={"ID": "external_id", "Language": "language", "Count": "quantity"},
+        value_maps=None, mode="add", to_staging=True)
+    assert batch.status == "completed"
+    assert db.query(StagingItem).one().language == "en"

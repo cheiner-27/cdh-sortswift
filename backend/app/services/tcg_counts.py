@@ -8,7 +8,7 @@ from fastapi import HTTPException
 from sqlalchemy import select
 from sqlalchemy.orm import Session, joinedload, selectinload
 
-from ..domain import CONDITION_LABELS, normalize_printing
+from ..domain import CONDITION_LABELS, normalize_language, normalize_printing
 from ..models import CatalogCard, CycleCount, InventoryItem, MarketplaceListing, collector_number_key, name_key, utcnow
 from ..validate import choice, whole, money
 from . import inventory as inv
@@ -41,7 +41,7 @@ def _bind(line, item):
 def _variant_fits(line, item):
     return (item.card and item.card.game == matcher._game_code(line["game_label"])
             and item.condition == line["condition"]
-            and item.printing == line["printing_canonical"] and (item.language or "").casefold() == "en")
+            and item.printing == line["printing_canonical"] and normalize_language(item.language) == "en")
 
 
 def _differences(line, item):
@@ -49,7 +49,7 @@ def _differences(line, item):
         ("game", "Game", item.card.game if item.card else "Custom", matcher._game_code(line["game_label"])),
         ("condition", "Condition", item.condition, line["condition"]),
         ("printing", "Printing", item.printing, line["printing_canonical"]),
-        ("language", "Language", (item.language or "").casefold(), "en"),
+        ("language", "Language", normalize_language(item.language), "en"),
     )
     def display(field, value):
         value = str(value or "Unknown")

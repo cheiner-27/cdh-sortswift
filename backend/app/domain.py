@@ -227,6 +227,11 @@ def normalize_condition(value: str) -> str:
     return "NM"
 
 
+def normalize_language(value: str | None) -> str:
+    """Language codes ignore capitalization; unknown codes stay unknown."""
+    return (value or "").strip().casefold()
+
+
 def normalize_printing(value: str, game: str | None = None) -> str:
     v = (value or "").strip().lower()
     canonical = PRINTING_SYNONYMS.get(v, v if v in CANONICAL_PRINTINGS else "normal")

@@ -4,7 +4,7 @@ from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
 from ..db import get_db
-from ..domain import CONDITIONS, CANONICAL_PRINTINGS, LANGUAGES
+from ..domain import CONDITIONS, CANONICAL_PRINTINGS, LANGUAGES, normalize_language
 from ..models import (
     CatalogCard, CycleCount, CycleCountLine, InventoryItem, InventoryLog, utcnow,
 )
@@ -29,6 +29,8 @@ _IDENTITY_OPTIONS = {
 
 def _identity_value(field: str, value):
     """Validate condition/printing/language; pass anything else through."""
+    if field == "language" and isinstance(value, str):
+        value = normalize_language(value)
     if field in _IDENTITY_OPTIONS:
         return choice(value, field, _IDENTITY_OPTIONS[field])
     return value
@@ -422,16 +424,25 @@ def split(item_id: int, payload: dict = Body(...), db: Session = Depends(get_db)
 
 @router.post("/merge-duplicates")
 def merge_duplicates(payload: dict = Body(default={}), db: Session = Depends(get_db)):
-    """Merge exact-match rows (identity+condition+printing+language+bin+cost
-    fields+comment+overrides+listing links). Irreversible."""
+    """Combine compatible active rows, preserving their shared FIFO batches.
+
+    Language-code case/spacing is immaterial; keep the surviving record's
+    stored identity unchanged so learned SKU metadata remains valid.
+    """
     items = filter_items(db, payload.get("filter", {}))
     groups: dict[tuple, list[InventoryItem]] = {}
     for it in items:
+        if it.deleted:
+            continue
         listing_key = tuple(sorted(
-            (l.marketplace, l.ebay_listing_id or "", l.tcg_sku_id or "")
-            for l in it.listings if l.ebay_listing_id or l.tcg_sku_id))
+            (l.marketplace, l.ebay_sku or "", l.ebay_offer_id or "",
+             l.ebay_listing_id or "", l.tcg_sku_id or "", l.listing_cap,
+             l.reserve_quantity, l.listed_price, l.listed_quantity, l.status)
+            for l in it.listings if (l.ebay_sku or l.ebay_offer_id or l.ebay_listing_id
+                or l.tcg_sku_id or l.listing_cap is not None or l.reserve_quantity
+                or l.listed_price is not None or l.listed_quantity or l.status != "unlisted")))
         key = (it.catalog_card_id, it.custom_sku_id, it.condition, it.printing,
-               it.language, it.bin, it.comment, it.price_override,
+               normalize_language(it.language), it.bin, it.comment, it.price_override,
                it.price_floor, listing_key)
         groups.setdefault(key, []).append(it)
     merged = 0
@@ -448,6 +459,9 @@ def merge_duplicates(payload: dict = Body(default={}), db: Session = Depends(get
                                     cause="bulk_update",
                                     comment=f"merged into #{keeper.id}")
             dup.deleted = True
+            # The surviving row owns the same external links. Leaving them on
+            # a deleted duplicate creates a false SKU conflict on the next CSV.
+            dup.listings.clear()
             merged += 1
     db.commit()
     return {"merged_rows": merged}
