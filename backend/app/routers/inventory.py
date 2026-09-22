@@ -542,6 +542,14 @@ def patch_tcg_line(count_id: int, line_id: int, payload: dict = Body(...), db: S
     return tcg_counts.view(db, count)
 
 
+@router.post("/cycle-counts/{count_id}/tcg-lines/{line_id}/candidates")
+def tcg_line_candidates(count_id: int, line_id: int, payload: dict = Body(...), db: Session = Depends(get_db)):
+    query = payload.get("q")
+    if query is not None and not isinstance(query, str):
+        raise HTTPException(400, "Search must be text")
+    return {"items": tcg_counts.candidates(db, _csv_count(db, count_id), line_id, query)}
+
+
 @router.post("/cycle-counts/{count_id}/rematch")
 def rematch_tcg_count(count_id: int, db: Session = Depends(get_db)):
     count = _csv_count(db, count_id)

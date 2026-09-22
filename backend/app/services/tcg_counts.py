@@ -9,7 +9,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session, joinedload, selectinload
 
 from ..domain import CONDITION_LABELS, normalize_printing
-from ..models import CycleCount, InventoryItem, MarketplaceListing, collector_number_key, name_key, utcnow
+from ..models import CatalogCard, CycleCount, InventoryItem, MarketplaceListing, collector_number_key, name_key, utcnow
 from ..validate import choice, whole, money
 from . import inventory as inv
 from . import order_intake as matcher
@@ -42,6 +42,105 @@ def _variant_fits(line, item):
     return (item.card and item.card.game == matcher._game_code(line["game_label"])
             and item.condition == line["condition"]
             and item.printing == line["printing_canonical"] and (item.language or "").casefold() == "en")
+
+
+def _differences(line, item):
+    values = (
+        ("game", "Game", item.card.game if item.card else "Custom", matcher._game_code(line["game_label"])),
+        ("condition", "Condition", item.condition, line["condition"]),
+        ("printing", "Printing", item.printing, line["printing_canonical"]),
+        ("language", "Language", (item.language or "").casefold(), "en"),
+    )
+    def display(field, value):
+        value = str(value or "Unknown")
+        return value.replace("_", " ").title() if field == "printing" else value.upper()
+    return [{"field": field, "label": label, "local": display(field, local), "tcg": display(field, tcg),
+             **({"source": "Expected"} if field == "language" else {})}
+            for field, label, local, tcg in values if local != tcg]
+
+
+def _difference_text(difference):
+    return f'{difference["label"]}: local {difference["local"]}; {difference.get("source", "TCG")} {difference["tcg"]}'
+
+
+def _unsupported_note(line):
+    if not matcher._game_code(line["game_label"]):
+        return f'Unsupported game: {line["game_label"]}'
+    if not line["condition"]:
+        return f'Unknown condition: {line["raw"].get("Condition", "")}'
+    return "SKU must be numeric"
+
+
+def _selection_error(line, item):
+    if not item or item.deleted:
+        return "Inventory record removed"
+    if not line["parse_ok"] or line["sealed"]:
+        return "Sealed listing excluded" if line["sealed"] else _unsupported_note(line)
+    differences = _differences(line, item)
+    return ". ".join(_difference_text(d) for d in differences) if differences else None
+
+
+def _candidate(line, item):
+    error = _selection_error(line, item)
+    return {**matcher._candidate(item), "game": item.card.game if item.card else None,
+            "condition": item.condition, "printing": item.printing, "language": item.language,
+            "differences": _differences(line, item),
+            "selectable": not error, "selection_error": error}
+
+
+def _review_note(line):
+    """Compact presentation for both new counts and older saved drafts."""
+    status = line["match_status"]
+    if status == "matched":
+        if "stock or pricing changed" in line.get("match_note", ""):
+            return "Inventory changed; review quantity"
+        return {"manual": "Manual link", "sku": "Saved SKU", "tcgcsv": "TCGCSV match"}.get(
+            line.get("match_method"), "Name/number match")
+    if status == "sealed":
+        return "Sealed; excluded"
+    if status == "dead":
+        return "Zero-stock listing"
+    if status == "unsupported":
+        return _unsupported_note(line)
+    if status == "ambiguous":
+        if "SKU" in line.get("match_note", ""):
+            return "Saved SKU conflict"
+        return "Multiple products" if "multiple products" in line.get("match_note", "") else "Multiple inventory records"
+    if line.get("issues"):
+        return " / ".join(d["label"] for d in line["issues"]) + " mismatch"
+    if any(c.get("selectable") for c in line.get("candidates", [])):
+        return "Record updated; refresh matches"
+    if line.get("match_method") == "manual":
+        return "Record changed; choose again"
+    return "Product missing from inventory" if line.get("product_id") else "No matching product"
+
+
+def _line(count, line_id):
+    line = next((l for l in count.source_data["lines"] if l["id"] == line_id), None)
+    if line is None:
+        raise HTTPException(404, "Count row not found")
+    return line
+
+
+def candidates(db, count, line_id, query=None):
+    _editable(count)
+    line = _line(count, line_id)
+    stmt = select(InventoryItem).options(joinedload(InventoryItem.card))
+    if query and query.strip():
+        key = name_key(query)
+        if not key:
+            return []
+        stmt = stmt.join(CatalogCard).where(
+            InventoryItem.deleted == False,  # noqa: E712
+            CatalogCard.game == matcher._game_code(line["game_label"]),
+            CatalogCard.name_norm.contains(key, autoescape=True))
+    else:
+        ids = {c["inventory_id"] for c in line.get("candidates", [])}
+        if line.get("inventory_id"):
+            ids.add(line["inventory_id"])
+        stmt = stmt.where(InventoryItem.id.in_(ids))
+    return [_candidate(line, item) for item in db.execute(stmt.order_by(
+        InventoryItem.quantity.desc(), InventoryItem.id).limit(60)).scalars()]
 
 
 class MatchIndex:
@@ -103,7 +202,7 @@ def _choose_candidate(line, candidates):
     choices = in_stock or variants
     if len(choices) == 1:
         return _bind(line, choices[0])
-    line["candidates"] = [matcher._candidate(it) for it in (choices or candidates)]
+    line["candidates"] = [_candidate(line, it) for it in (choices or candidates)]
     if choices:
         line.update(match_status="ambiguous", match_note="More than one inventory record fits; choose the record")
     else:
@@ -132,7 +231,7 @@ def match_row(db: Session, line: dict, index=None) -> dict:
             line.update(match_note="Exact stored SKU", match_method="sku")
             return _bind(line, valid[0].item)
         line.update(match_status="ambiguous", match_note="Stored SKU conflicts with inventory; review identity",
-                    candidates=[matcher._candidate(l.item) for l in links if not l.item.deleted])
+                    candidates=[_candidate(line, l.item) for l in links if not l.item.deleted])
         return line
 
     product_ids = index.products.lookup(line)
@@ -142,7 +241,7 @@ def match_row(db: Session, line: dict, index=None) -> dict:
         if len(product_ids) > 1:
             # In particular, a missing vintage number must not pick arbitrarily.
             line.update(match_status="ambiguous", match_note="TCGplayer name/set identifies multiple products; choose manually")
-            line["candidates"] = [matcher._candidate(it) for pid in product_ids
+            line["candidates"] = [_candidate(line, it) for pid in product_ids
                                   for it in index.by_product.get((game, pid), [])]
             return line
         line["product_id"] = product_ids[0]
@@ -251,8 +350,9 @@ def patch_line(db: Session, count: CycleCount, line_id: int, payload: dict):
         raise HTTPException(404, "Count row not found")
     if "inventory_id" in payload:
         item = db.get(InventoryItem, whole(payload["inventory_id"], "inventory_id", min_value=1))
-        if not item or item.deleted or not line["parse_ok"] or not _variant_fits(line, item):
-            raise HTTPException(400, "Choose active English inventory with the same game, condition and printing")
+        problem = _selection_error(line, item)
+        if problem:
+            raise HTTPException(400, problem)
         _bind(line, item)
         line.update(match_method="manual", match_note="Identity selected by reviewer")
     if "resolution" in payload:
@@ -297,9 +397,27 @@ def rematch(db: Session, count: CycleCount):
 def view(db: Session, count: CycleCount):
     data = count.source_data or {}
     lines = copy.deepcopy(data.get("lines", []))
+    # Saved drafts predate candidate diagnostics. Enrich them from current
+    # inventory without rematching or replacing the approved-review snapshot.
+    items = {it.id: it for it in db.execute(select(InventoryItem).options(
+        joinedload(InventoryItem.card))).scalars()}
     assigned = Counter(l["inventory_id"] for l in lines
                        if l.get("inventory_id") and l["resolution"] != "skip")
     for line in lines:
+        line["candidates"] = [
+            _candidate(line, items[c["inventory_id"]]) if c["inventory_id"] in items else
+            {**c, "selectable": False, "selection_error": "Inventory record removed", "differences": []}
+            for c in line.get("candidates", [])]
+        fields = {}
+        if line["match_status"] == "unmatched":
+            for candidate in line["candidates"]:
+                for difference in candidate["differences"]:
+                    entry = fields.setdefault(difference["field"], {**difference, "values": []})
+                    if difference["local"] not in entry["values"]:
+                        entry["values"].append(difference["local"])
+        line["issues"] = [{k: v for k, v in d.items() if k != "values"} |
+                          {"local": " / ".join(d["values"])} for d in fields.values()]
+        line["review_note"] = _review_note(line)
         line["conflict"] = bool(line.get("inventory_id") and line["resolution"] != "skip"
                                 and assigned[line["inventory_id"]] > 1)
         line["price_missing"] = line["resolution"] not in ("skip", "excluded") and (
@@ -308,16 +426,18 @@ def view(db: Session, count: CycleCount):
     represented = {l["inventory_id"] for l in lines if l.get("inventory_id")}
     games = {matcher._game_code(l["game_label"]) for l in lines}
     unlisted = [dict(inventory_id=it.id, label=inv.item_description(it), quantity=it.quantity, bin=it.bin)
-                for it in db.execute(select(InventoryItem).where(
-                    InventoryItem.deleted == False, InventoryItem.quantity > 0).options(joinedload(InventoryItem.card))).scalars()  # noqa: E712
-                if it.card and it.card.game in games and it.id not in represented]
+                for it in items.values()
+                if not it.deleted and it.quantity > 0 and it.card and it.card.game in games and it.id not in represented]
     return {"id": count.id, "source": count.source, "status": count.status,
             "filename": data.get("filename"), "lines": lines, "unlisted": unlisted,
             "catalog": data.get("catalog", {}),
             "summary": {
                 "unmatched": sum(l["match_status"] in ("unmatched", "unsupported") and l["resolution"] != "skip" for l in lines),
                 "missing_product_link": sum(l["match_status"] == "unmatched" and bool(l.get("product_id")) and not l["candidates"] and l["resolution"] != "skip" for l in lines),
-                "variant_mismatch": sum(l["match_status"] == "unmatched" and bool(l.get("product_id")) and bool(l["candidates"]) and l["resolution"] != "skip" for l in lines),
+                "variant_mismatch": sum(bool(l["issues"]) and l["resolution"] != "skip" for l in lines),
+                "condition_mismatches": sum(any(d["field"] == "condition" for d in l["issues"]) and l["resolution"] != "skip" for l in lines),
+                "printing_mismatches": sum(any(d["field"] == "printing" for d in l["issues"]) and l["resolution"] != "skip" for l in lines),
+                "language_mismatches": sum(any(d["field"] == "language" for d in l["issues"]) and l["resolution"] != "skip" for l in lines),
                 "ambiguous": sum(l["match_status"] == "ambiguous" and l["resolution"] != "skip" for l in lines),
                 "variances": sum(bool(l.get("inventory_id")) and l["expected"] != l["counted"] and l["resolution"] != "skip" for l in lines),
                 "conflicts": sum(l["conflict"] for l in lines),

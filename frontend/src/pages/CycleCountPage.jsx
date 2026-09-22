@@ -1,9 +1,11 @@
 import React, { useEffect, useState } from 'react'
+import { useSearchParams } from 'react-router-dom'
 import { api, download } from '../api.js'
 import { Field, Msg, useMsg } from '../components.jsx'
 import TcgCountReview from '../TcgCountReview.jsx'
 
 export default function CycleCountPage() {
+  const [sp, setSp] = useSearchParams()
   const [msg, ok, err] = useMsg()
   const [bins, setBins] = useState([])
   const [counts, setCounts] = useState([])
@@ -15,7 +17,10 @@ export default function CycleCountPage() {
     api.get('/api/inventory/bins').then(setBins).catch(err)
     api.get('/api/inventory/cycle-counts/list').then(setCounts).catch(err)
   }
-  useEffect(refresh, [])
+  useEffect(() => {
+    refresh()
+    if (sp.get('count')) open(sp.get('count'))
+  }, [])
 
   const start = async () => {
     try {
@@ -26,7 +31,10 @@ export default function CycleCountPage() {
     } catch (e) { err(e) }
   }
   const open = async (id) => {
-    try { setActive(await api.get(`/api/inventory/cycle-counts/${id}`)) } catch (e) { err(e) }
+    try {
+      setActive(await api.get(`/api/inventory/cycle-counts/${id}`))
+      setSp({ count: String(id) }, { replace: true })
+    } catch (e) { err(e) }
   }
   const upload = async (file) => {
     if (!file) return
@@ -101,7 +109,7 @@ export default function CycleCountPage() {
       </div>
 
       {active?.source === 'tcgplayer' && <TcgCountReview key={active.id} count={active} onChange={setActive}
-        onApproved={refresh} err={err} ok={ok} />}
+        onApproved={refresh} ok={ok} />}
       {active && active.source !== 'tcgplayer' && (
         <div className="panel">
           <div className="row center">

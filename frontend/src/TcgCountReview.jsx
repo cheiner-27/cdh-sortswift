@@ -6,19 +6,25 @@ import { Modal } from './components.jsx'
 const base = '/api/inventory/cycle-counts'
 const labels = { agree: 'Agrees', accept_tcg: 'Update local', push_local: 'Correct TCG', skip: 'Skipped', excluded: 'Excluded' }
 
-export default function TcgCountReview({ count, onChange, onApproved, err, ok }) {
+export default function TcgCountReview({ count, onChange, onApproved, ok }) {
   const [filter, setFilter] = useState('attention')
   const [query, setQuery] = useState('')
   const [limit, setLimit] = useState(80)
   const [picker, setPicker] = useState(null)
   const [busy, setBusy] = useState(false)
+  const [actionError, setActionError] = useState('')
+  const [notice, setNotice] = useState('')
   const locked = count.status !== 'in_progress'
+  const showError = (e) => setActionError(String(e.message || e))
   const action = async (fn) => {
+    setActionError('')
+    setNotice('')
     setBusy(true)
-    try { await fn() } catch (e) { err(e) } finally { setBusy(false) }
+    try { await fn() } catch (e) { showError(e) } finally { setBusy(false) }
   }
   const patch = (line, payload) => action(async () => {
     onChange(await api.patch(`${base}/${count.id}/tcg-lines/${line.id}`, payload))
+    if (payload.inventory_id) setNotice(`Linked ${line.card_name} to record #${payload.inventory_id}.`)
     setPicker(null)
   })
   const approve = () => {
@@ -53,13 +59,15 @@ export default function TcgCountReview({ count, onChange, onApproved, err, ok })
     </div>
     {count.summary && <p className="muted">
       {count.summary.tcgcsv_matches} linked through TCGCSV · {count.summary.unmatched} unlinked
-      {' '}({count.summary.variant_mismatch} condition/finish/language differences, {count.summary.missing_product_link} missing local product links)
+      {' '}({count.summary.condition_mismatches ?? 0} condition · {count.summary.printing_mismatches ?? 0} printing · {count.summary.language_mismatches ?? 0} language · {count.summary.missing_product_link} missing product links)
       {' '}· {count.summary.ambiguous} ambiguous · {count.summary.variances} quantity variances
       {' '}· {count.summary.conflicts} duplicate links
     </p>}
     {!locked && <p className="muted">Refresh keeps manual matches and unchanged decisions. TCGCSV names and sets are cached daily;
       collector numbers are optional. The first lookup across many sets can take a few minutes.</p>}
-    {busy && <p role="status">Working… downloading uncached TCGCSV sets may take a few minutes.</p>}
+    {busy && <p role="status">Working…</p>}
+    {actionError && !picker && <p className="error-text" role="alert">{actionError}</p>}
+    {notice && <p className="success-text" role="status">{notice}</p>}
     {count.catalog?.warnings?.length > 0 && <details><summary>Catalog lookup notices ({count.catalog.warnings.length})</summary>
       <ul>{count.catalog.warnings.map((warning, i) => <li key={i}>{warning}</li>)}</ul></details>}
     {locked && <div className="panel">
@@ -88,10 +96,13 @@ export default function TcgCountReview({ count, onChange, onApproved, err, ok })
         <tbody>{rows.slice(0, limit).map((l) => <tr key={l.id}>
           <td>{l.card_name}<div className="muted">{l.set_name} · {l.collector_number ? `#${l.collector_number}` : 'No collector number'} · {l.raw.Condition} · SKU {l.sku}</div></td>
           <td>{l.label || 'Unlinked'}{l.bin && <div>Bin {l.bin}</div>}
-            <div className="muted">{l.match_note}</div>
-            {l.price_missing && <div className="badge red">Missing listed price — skip or correct the CSV</div>}
-            {l.conflict && <span className="badge red">Same inventory linked twice — resolve or skip</span>}
-            {!locked && l.parse_ok && !l.sealed && <button className="small" disabled={busy} onClick={() => setPicker(l)}>Find / change…</button>}
+            <div className="muted">{l.review_note || l.match_note}</div>
+            <Differences differences={l.issues} />
+            {l.price_missing && <div className="badge red">Missing price</div>}
+            {l.conflict && <span className="badge red">Duplicate inventory link</span>}
+            {!locked && l.parse_ok && !l.sealed && <button className="small" disabled={busy} onClick={() => {
+              setActionError(''); setPicker(l)
+            }}>Find / change…</button>}
           </td>
           <td>{l.expected ?? '—'}</td><td>{l.counted}</td><td>{fmtMoney(l.listed_price)}</td>
           <td>
@@ -114,33 +125,53 @@ export default function TcgCountReview({ count, onChange, onApproved, err, ok })
         {count.unlisted.map((it) => <tr key={it.inventory_id}><td>{it.label}</td><td>{it.bin}</td><td>{it.quantity}</td></tr>)}
       </tbody></table>
     </details>
-    {picker && <InventoryPicker line={picker} busy={busy} onClose={() => setPicker(null)}
-      onPick={(id) => patch(picker, { inventory_id: id })} err={err} />}
+    {picker && <InventoryPicker countId={count.id} line={picker} busy={busy} error={actionError}
+      clearError={() => setActionError('')}
+      onClose={() => { if (!busy) { setPicker(null); setActionError('') } }}
+      onPick={(id) => patch(picker, { inventory_id: id })} />}
   </div>
 }
 
-function InventoryPicker({ line, onPick, onClose, busy, err }) {
+function Differences({ differences }) {
+  return (differences || []).map((d) => <div key={d.field}>
+    <span className="badge yellow">{d.label}</span>{' '}Local {d.local} · {d.source || 'TCG'} {d.tcg}
+  </div>)
+}
+
+function InventoryPicker({ countId, line, onPick, onClose, busy, error, clearError }) {
   const [q, setQ] = useState(line.card_name)
   const [results, setResults] = useState(null)
-  const search = async () => {
+  const [searching, setSearching] = useState(false)
+  const [searchError, setSearchError] = useState('')
+  const [lastQuery, setLastQuery] = useState(null)
+  const search = async (query) => {
+    clearError()
+    setSearchError('')
+    setSearching(true)
     try {
-      const r = await api.post('/api/inventory/search', {
-        q, condition: line.condition, printing: line.printing_canonical, in_stock_only: false, limit: 60,
-      })
-      setResults(r.items.map((it) => ({
-        inventory_id: it.id, label: `${it.card?.name || it.custom_name} [${it.card?.set_code || ''} #${it.card?.collector_number || ''}] ${it.condition} ${it.printing} ${it.language}`,
-        bin: it.bin, quantity: it.quantity,
-      })))
-    } catch (e) { err(e) }
+      const r = await api.post(`${base}/${countId}/tcg-lines/${line.id}/candidates`, { q: query })
+      setResults(r.items)
+      setLastQuery(query)
+    } catch (e) { setSearchError(String(e.message || e)) } finally { setSearching(false) }
   }
+  const disabled = busy || searching
   return <Modal wide title={`Match ${line.card_name}`} onClose={onClose}>
-    <p>{line.set_name} · {line.collector_number ? `#${line.collector_number}` : 'No collector number'} · {line.raw.Condition}. Choose the inventory record whose quantity this listing represents.</p>
-    <div className="row center"><input value={q} onChange={(e) => setQ(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && search()} />
-      <button onClick={search} disabled={busy}>Search inventory (including zero stock)</button></div>
+    <p>{line.set_name} · {line.collector_number ? `#${line.collector_number}` : 'No collector number'} · {line.raw.Condition}</p>
+    <p className="muted">Condition, printing and language must agree. If local details are wrong, edit the record, then return and refresh matches.</p>
+    {(error || searchError) && <p className="error-text" role="alert">{error || searchError}</p>}
+    <div className="row center"><input aria-label="Inventory name" value={q} onChange={(e) => setQ(e.target.value)}
+      onKeyDown={(e) => { if (e.key === 'Enter' && !disabled) search(q) }} />
+      <button onClick={() => search(q)} disabled={disabled}>Search inventory</button>
+      <button onClick={() => search(lastQuery)} disabled={disabled}>Refresh records</button></div>
     <table><tbody>{(results || line.candidates).map((it) => <tr key={it.inventory_id}>
-      <td>{it.label}</td><td>Bin {it.bin || 'unassigned'} · Qty {it.quantity}</td>
-      <td><button disabled={busy} onClick={() => onPick(it.inventory_id)}>Use this record</button></td>
+      <td>{it.label}<Differences differences={it.differences} />
+        {!it.selectable && !it.differences?.length && <div className="error-text">{it.selection_error}</div>}
+      </td><td>Bin {it.bin || 'unassigned'} · Qty {it.quantity}</td>
+      <td><button disabled={disabled || it.selectable === false} title={it.selection_error || ''}
+        onClick={() => { setSearchError(''); onPick(it.inventory_id) }}>{busy ? 'Saving…' : 'Use this record'}</button>
+        <div><Link style={{ color: 'var(--accent)' }} to={`/inventory?item=${it.inventory_id}&count=${countId}`}>Edit inventory record</Link></div>
+      </td>
     </tr>)}</tbody></table>
-    {results?.length === 0 && <p>No inventory match. Add the missing item through normal intake, then refresh matches, or skip this CSV row.</p>}
+    {results?.length === 0 && <p>No records found. Try the base card name or add the missing inventory.</p>}
   </Modal>
 }

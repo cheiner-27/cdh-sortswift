@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react'
-import { useSearchParams } from 'react-router-dom'
+import { Link, useSearchParams } from 'react-router-dom'
 import { api, fmtMoney, scanImageUrl } from '../api.js'
 import { Field, Modal, Msg, SortTh, useMeta, useMsg, useSort } from '../components.jsx'
 
@@ -55,6 +55,8 @@ export default function InventoryPage() {
   // ?lot_date=&lot_cost= arrives from the Purchases screen: show that whole
   // purchase, sold-out rows and all, rather than the default in-stock view.
   useEffect(() => {
+    const itemId = sp.get('item')
+    if (itemId) api.get(`/api/inventory/${itemId}`).then(setDetail).catch(err)
     const date = sp.get('lot_date')
     if (!date) { search(); return }
     const cost = sp.get('lot_cost')
@@ -282,7 +284,7 @@ export default function InventoryPage() {
         </div>
       )}</div>
 
-      {detail && <DetailModal meta={meta} item={detail} onClose={() => { setDetail(null); search() }}
+      {detail && <DetailModal meta={meta} item={detail} returnCount={sp.get('count')} onClose={() => { setDetail(null); search() }}
         onSplit={() => { setModal('split') }} onMsg={{ ok, err }} />}
       {modal === 'bulk' && <BulkEditModal meta={meta} selFilter={selFilter()} onClose={() => { setModal(null); search() }} />}
       {modal === 'adjust' && <AdjustModal ids={[...selected]} onClose={() => { setModal(null); search() }} />}
@@ -307,12 +309,17 @@ export default function InventoryPage() {
   )
 }
 
-function DetailModal({ meta, item, onClose, onSplit, onMsg }) {
+function DetailModal({ meta, item, returnCount, onClose, onSplit, onMsg }) {
   const [it, setIt] = useState(item)
+  const [saveError, setSaveError] = useState('')
+  const [saving, setSaving] = useState(false)
   const [sr, setSr] = useState({ mode: 'partial', quantity: 1, amount: '' })
   const patch = async (payload) => {
-    await api.patch(`/api/inventory/${it.id}`, payload)
-    setIt(await api.get(`/api/inventory/${it.id}`))
+    setSaveError(''); setSaving(true)
+    try {
+      await api.patch(`/api/inventory/${it.id}`, payload)
+      setIt(await api.get(`/api/inventory/${it.id}`))
+    } catch (e) { setSaveError(String(e.message || e)) } finally { setSaving(false) }
   }
   const supplierRefund = async () => {
     try {
@@ -337,16 +344,23 @@ function DetailModal({ meta, item, onClose, onSplit, onMsg }) {
   }
   return (
     <Modal title={it.card ? it.card.name : it.custom_name || `Item #${it.id}`} onClose={onClose} wide>
+      {saveError && <p className="error-text" role="alert">{saveError}</p>}
+      {returnCount && !saving && <p><Link style={{ color: 'var(--accent)' }} to={`/cycle-counts?count=${returnCount}`}>Return to count #{returnCount}</Link> · Refresh matches after editing.</p>}
+      {saving && <p role="status">Saving inventory…</p>}
       <div className="row">
         {it.card?.image_url && <img className="card-img large" src={it.card.image_url} alt="" />}
         {it.scan_image_path && <img className="card-img large" src={scanImageUrl(it.scan_image_path)} alt="scan" />}
         <div>
           {it.card && <p className="muted">{it.card.game} · {it.card.set_name} ({it.card.set_code}) #{it.card.collector_number} · {it.card.rarity}</p>}
           <div className="row">
-            <Field label="Condition"><select value={it.condition} onChange={(e) => patch({ condition: e.target.value })}>
+            <Field label="Condition"><select disabled={saving} value={it.condition} onChange={(e) => patch({ condition: e.target.value })}>
               {meta.conditions.map((c) => <option key={c}>{c}</option>)}</select></Field>
-            <Field label="Printing"><select value={it.printing} onChange={(e) => patch({ printing: e.target.value })}>
+            <Field label="Printing"><select disabled={saving} value={it.printing} onChange={(e) => patch({ printing: e.target.value })}>
               {meta.printings.map((p) => <option key={p}>{p}</option>)}</select></Field>
+            <Field label="Language"><select disabled={saving} value={it.language} onChange={(e) => patch({ language: e.target.value })}>
+              {!meta.languages.includes(it.language) && <option value={it.language}>{it.language || 'Unknown'}</option>}
+              {meta.languages.map((language) => <option key={language} value={language}>{language.toUpperCase()}</option>)}
+            </select></Field>
             <Field label="Bin"><input style={{ width: 90 }} defaultValue={it.bin}
               onBlur={(e) => e.target.value !== it.bin && patch({ bin: e.target.value })} /></Field>
             <Field label="Price override"><input style={{ width: 80 }} defaultValue={it.price_override ?? ''}

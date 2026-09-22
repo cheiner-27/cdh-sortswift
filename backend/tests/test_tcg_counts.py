@@ -493,3 +493,110 @@ def test_missing_id_bridge_rejects_wrong_set_number_or_conflicting_product(db, c
     item_for(db, card)
     cache_products(db, [{"product_id": 111, "name": "Test Bolt", "number": "42"}], abbreviation="MH3")
     assert count_for(db).source_data["lines"][0]["inventory_id"] is None
+
+
+@pytest.mark.parametrize("field,value,local,tcg_value", [
+    ("condition", "LP", "LP", "NM"), ("printing", "foil", "Foil", "Normal"),
+    ("language", "LY", "LY", "EN"), ("language", "ja", "JA", "EN"),
+])
+def test_picker_and_row_explain_the_exact_mismatch(db, card, field, value, local, tcg_value):
+    item = item_for(db, card)
+    setattr(item, field, value)
+    db.commit()
+    count = count_for(db)
+    line = tcg.view(db, count)["lines"][0]
+    assert line["issues"] == [{"field": field, "label": field.title(), "local": local, "tcg": tcg_value,
+                               **({"source": "Expected"} if field == "language" else {})}]
+    assert line["review_note"] == f"{field.title()} mismatch"
+    summary = tcg.view(db, count)["summary"]
+    assert summary["variant_mismatch"] == 1
+    assert summary[f"{field}_mismatches"] == 1
+    candidate = line["candidates"][0]
+    assert not candidate["selectable"]
+    source = "Expected" if field == "language" else "TCG"
+    assert candidate["selection_error"] == f"{field.title()}: local {local}; {source} {tcg_value}"
+    before = copy.deepcopy(count.source_data)
+    with pytest.raises(HTTPException) as exc:
+        tcg.patch_line(db, count, 1, {"inventory_id": item.id})
+    assert exc.value.detail == candidate["selection_error"]
+    assert count.source_data == before
+
+
+def test_old_drafts_get_current_diagnostics_without_rematching(db, card):
+    item = item_for(db, card, printing="foil")
+    count = count_for(db)
+    data = copy.deepcopy(count.source_data)
+    candidate = data["lines"][0]["candidates"][0]
+    for field in ("differences", "selectable", "selection_error", "condition", "printing", "language", "game"):
+        candidate.pop(field, None)
+    count.source_data = data
+    db.commit()
+    before = copy.deepcopy(count.source_data)
+    line = tcg.view(db, count)["lines"][0]
+    assert line["review_note"] == "Printing mismatch"
+    assert not line["candidates"][0]["selectable"]
+    assert count.source_data == before
+    item.printing = "normal"
+    db.commit()
+    refreshed = tcg.candidates(db, count, 1)
+    assert refreshed[0]["selectable"] and refreshed[0]["differences"] == []
+    assert tcg.view(db, count)["lines"][0]["review_note"] == "Record updated; refresh matches"
+    tcg.patch_line(db, count, 1, {"inventory_id": item.id})
+    assert tcg.view(db, count)["lines"][0]["review_note"] == "Manual link"
+
+
+def test_multiple_mismatches_and_removed_records_are_specific(db, card):
+    item = item_for(db, card, printing="foil")
+    item.condition, item.language = "LP", "ja"
+    db.commit()
+    count = count_for(db)
+    line = tcg.view(db, count)["lines"][0]
+    assert {d["field"] for d in line["issues"]} == {"condition", "printing", "language"}
+    item.deleted = True
+    db.commit()
+    assert tcg.candidates(db, count, 1)[0]["selection_error"] == "Inventory record removed"
+
+
+def test_picker_api_search_reject_fix_select_and_resume():
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+    from sqlalchemy.pool import StaticPool
+    from app.db import Base, get_db
+    from app.models import CatalogCard
+    from app.routers import inventory
+
+    engine = create_engine("sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)
+    Base.metadata.create_all(engine)
+    session = sessionmaker(bind=engine, expire_on_commit=False)()
+    app = FastAPI()
+    app.include_router(inventory.router)
+    app.dependency_overrides[get_db] = lambda: session
+    card = CatalogCard(game="mtg", name="Test Bolt", external_id="picker-test",
+                       collector_number="42", set_code="TEST", tcgplayer_product_id=111)
+    session.add(card)
+    session.flush()
+    item = item_for(session, card, printing="foil")
+    count = count_for(session)
+    base = f"/api/inventory/cycle-counts/{count.id}/tcg-lines/1"
+    with TestClient(app) as client:
+        result = client.post(base + "/candidates", json={"q": "Test Bolt"})
+        assert result.status_code == 200
+        candidate = result.json()["items"][0]
+        assert candidate["inventory_id"] == item.id and not candidate["selectable"]
+        result = client.patch(base, json={"inventory_id": item.id})
+        assert result.status_code == 400
+        assert result.json()["detail"] == "Printing: local Foil; TCG Normal"
+        # The existing inventory editor preserves FIFO when correcting a printing.
+        assert client.patch(f"/api/inventory/{item.id}", json={"printing": "normal"}).status_code == 200
+        assert client.post(base + "/candidates", json={}).json()["items"][0]["selectable"]
+        result = client.patch(base, json={"inventory_id": item.id})
+        assert result.status_code == 200
+        assert result.json()["lines"][0]["inventory_id"] == item.id
+        reloaded = client.get(f"/api/inventory/cycle-counts/{count.id}").json()["lines"][0]
+        assert reloaded["match_method"] == "manual" and reloaded["ready"]
+        assert item.quantity == 3 and not item.listings
+        assert client.post(base + "/candidates", json={"q": "!!!"}).json()["items"] == []
+    session.close()
+    engine.dispose()

@@ -25,6 +25,14 @@ approved twice.
    includes zero-stock inventory. If the item is missing, add it through normal
    intake, then refresh matches. A row represents one selected inventory record;
    review quantities carefully when the same card is stored across bins.
+   Field badges show the exact difference, such as **Printing: Local Normal ·
+   TCG Foil**. **Use this record** is available when game, condition, printing,
+   and language agree. Selection errors appear inside the picker.
+   Language shows **Expected EN**, the current import rule; this CSV has no
+   explicit language column.
+   If local details are wrong, choose **Edit inventory record**, correct the
+   fields, then **Return to count** and refresh matches. Inventory edits save
+   immediately through the normal inventory editor; linking only saves the draft.
 5. Approve after every variance has a decision. Approval learns TCG SKU IDs,
    adopts current listed prices, and applies only the local adjustments you
    selected. Each adjustment is logged with cause `tcg_reconcile`; FIFO stock
