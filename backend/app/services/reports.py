@@ -7,7 +7,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from ..models import (
-    AcquisitionLog, CatalogCard, FifoConsumption, InventoryItem, Order, PriceData,
+    AcquisitionLog, CatalogCard, FifoConsumption, InventoryItem, Order, PriceData, InventoryOperation,
 )
 from . import inventory as inv_svc
 
@@ -124,21 +124,26 @@ def aging_report(db: Session) -> dict:
                for lo, hi in AGE_BUCKETS}
     unknown = {"units": 0, "cost_value": 0.0, "market_value": 0.0}
     total_cost = total_market = 0.0
+    assigned = inv_svc.allocated_slices(db, items)
+    now = datetime.now(timezone.utc)
     for item in items:
-        age = inv_svc.inventory_age_days(db, item)
-        cost = inv_svc.fifo_unit_cost(db, item) or 0.0
         market = item.current_price or item.price_override or 0.0
-        total_cost += cost * item.quantity
+        slices = assigned[item.id]
+        known_units = 0
+        for batch, quantity in slices:
+            known_units += quantity
+            age = max(0, (now - inv_svc._as_utc(batch.acquired_at)).days)
+            key = next(f"{lo}-{hi if hi else '+'}d" for lo, hi in AGE_BUCKETS
+                       if age >= lo and (hi is None or age <= hi))
+            target = buckets[key]
+            value = batch.unit_cost * quantity
+            target["units"] += quantity
+            target["cost_value"] += value
+            target["market_value"] += market * quantity
+            total_cost += value
+        unknown["units"] += item.quantity - known_units
+        unknown["market_value"] += market * (item.quantity - known_units)
         total_market += market * item.quantity
-        target = unknown
-        if age is not None:
-            for lo, hi in AGE_BUCKETS:
-                if age >= lo and (hi is None or age <= hi):
-                    target = buckets[f"{lo}-{hi if hi else '+'}d"]
-                    break
-        target["units"] += item.quantity
-        target["cost_value"] += cost * item.quantity
-        target["market_value"] += market * item.quantity
     for b in list(buckets.values()) + [unknown]:
         b["cost_value"] = round(b["cost_value"], 2)
         b["market_value"] = round(b["market_value"], 2)
@@ -212,6 +217,8 @@ def _net_proceeds_by_batch(db: Session) -> dict[int, dict]:
 
     out: dict[int, dict] = defaultdict(lambda: {"units": 0, "net": 0.0})
     for c in consumptions:
+        if c.kind != "sale" and not (c.kind == "legacy" and c.order_id):
+            continue
         entry = out[c.acquisition_id]
         entry["units"] += c.quantity
         order = by_order.get(c.order_id)
@@ -266,6 +273,8 @@ def purchase_lots(db: Session) -> list[dict]:
     consumed: dict[int, int] = defaultdict(int)
     cogs_sold: dict[int, float] = defaultdict(float)
     for row in db.execute(select(FifoConsumption)).scalars():
+        if row.kind != "sale" and not (row.kind == "legacy" and row.order_id):
+            continue
         consumed[row.acquisition_id] += row.quantity
         cogs_sold[row.acquisition_id] += row.quantity * row.unit_cost
     proceeds = _net_proceeds_by_batch(db)
@@ -285,24 +294,33 @@ def purchase_lots(db: Session) -> list[dict]:
         pool_ask[pool] = {"units": units, "value": value,
                           "per_unit": (value / units) if units else 0.0}
 
-    lots: dict[tuple, dict] = {}
-    for b in batches:
-        key = (b.acquired_at.date().isoformat(), b.unit_cost)
+    adjustments = defaultdict(float)
+    for event in db.execute(select(InventoryOperation)).scalars():
+        for change in (event.details or {}).get("purchase_adjustments", []):
+            adjustments[change["root_id"]] += change["amount"]
+    lots = {}
+    for batch in batches:
+        root = inv_svc.root_batch(db, batch)
+        if root.origin_kind not in ("purchase", "legacy"):
+            continue
+        original = root.original_unit_cost if root.original_unit_cost is not None else root.unit_cost
+        key = (root.acquired_at.date().isoformat(), original)
         lot = lots.setdefault(key, {
-            "date": key[0], "unit_cost": b.unit_cost, "batches": 0, "units": 0,
+            "date": key[0], "unit_cost": original, "batches": 0, "units": 0,
             "paid": 0.0, "left": 0, "sold": 0, "cogs_sold": 0.0, "revenue": 0.0,
             "cards": set(), "pools": set(), "left_by_pool": defaultdict(int),
         })
-        lot["batches"] += 1
-        lot["units"] += b.quantity
-        lot["paid"] += b.quantity * b.unit_cost
-        lot["left"] += b.quantity_remaining
-        lot["sold"] += consumed.get(b.id, 0)
-        lot["cogs_sold"] += cogs_sold.get(b.id, 0.0)
-        lot["revenue"] += proceeds.get(b.id, {}).get("net", 0.0)
-        lot["cards"].add((b.catalog_card_id, b.custom_sku_id))
-        lot["pools"].add(inv_svc.pool_key(b))
-        lot["left_by_pool"][inv_svc.pool_key(b)] += b.quantity_remaining
+        if batch.id == root.id:
+            lot["batches"] += 1
+            lot["units"] += root.quantity
+            lot["paid"] += root.quantity * original + adjustments[root.id]
+        lot["left"] += batch.quantity_remaining
+        lot["sold"] += consumed.get(batch.id, 0)
+        lot["cogs_sold"] += cogs_sold.get(batch.id, 0.0)
+        lot["revenue"] += proceeds.get(batch.id, {}).get("net", 0.0)
+        lot["cards"].add((batch.catalog_card_id, batch.custom_sku_id))
+        lot["pools"].add(inv_svc.pool_key(batch))
+        lot["left_by_pool"][inv_svc.pool_key(batch)] += batch.quantity_remaining
 
     out = []
     for lot in lots.values():

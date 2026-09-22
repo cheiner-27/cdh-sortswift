@@ -10,11 +10,13 @@ import csv
 import io
 from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import select
+from sqlalchemy import select, func, or_
 from sqlalchemy.orm import Session
+from fastapi import HTTPException
 
 from ..domain import normalize_condition, normalize_language, normalize_printing
-from ..models import CatalogCard, ImportBatch, ImportRow, InventoryItem, StagingItem
+from ..models import CatalogCard, ImportBatch, ImportRow, InventoryItem, StagingItem, AcquisitionLog, FifoConsumption
+from ..validate import whole, money
 from . import inventory as inv_svc
 from .settings import get_setting
 
@@ -134,9 +136,13 @@ def run_import(db: Session, *, filename: str, content: bytes, mapping: dict,
         row = ImportRow(batch_id=batch.id, raw=raw, mapped=mapped)
         db.add(row)
         try:
-            qty = int(float(mapped.get("quantity") or 1))
-        except ValueError:
-            qty = 1
+            qty = whole(mapped.get("quantity"), "quantity", default=1)
+            cost = money(str(mapped["cost"]).replace("$", "") if mapped.get("cost") else None,
+                         "cost", default=None)
+        except HTTPException as exc:
+            row.status, row.error = "error", str(exc.detail)
+            errors += 1
+            continue
         card, candidates = match_card(db, mapped)
         if card is None:
             if candidates:
@@ -151,25 +157,55 @@ def run_import(db: Session, *, filename: str, content: bytes, mapping: dict,
                 errors += 1
             continue
 
-        cost = None
-        if mapped.get("cost"):
-            try:
-                cost = float(str(mapped["cost"]).replace("$", ""))
-            except ValueError:
-                pass
         acquired_at = _parse_acquired(mapped)
-
-        applied = _apply_row(db, batch, row, card, mapped, qty, cost, acquired_at,
-                             mode, to_staging)
-        qty_total += applied
+        try:
+            with db.begin_nested():
+                qty_total += _apply_traced(db, batch, row, card, mapped, qty, cost, acquired_at,
+                                         mode, to_staging)
+        except HTTPException as exc:
+            row.status, row.error = "error", str(exc.detail)
+            errors += 1
 
     batch.quantity_total = qty_total
     batch.error_count = errors
+    db.flush()
     ambiguous = any(r.status == "ambiguous" for r in batch.rows)
     batch.status = ("partially_complete" if (errors or ambiguous)
                     else "completed") if len(raws) else "completed"
     db.commit()
     return batch
+
+
+def _stock_snapshot(db, card_id):
+    db.flush()
+    return {
+        "items": [{"id": i.id, "quantity": i.quantity, "condition": i.condition,
+                   "printing": i.printing, "language": i.language, "bin": i.bin, "deleted": i.deleted,
+                   "price": i.current_price, "comment": i.comment}
+                  for i in db.execute(select(InventoryItem).where(InventoryItem.catalog_card_id == card_id,
+                                      or_(InventoryItem.deleted == False, InventoryItem.quantity != 0))
+                                      .order_by(InventoryItem.id)).scalars()],
+        "lots": [{"id": b.id, "quantity": b.quantity, "remaining": b.quantity_remaining,
+                  "cost": b.unit_cost, "condition": b.condition, "printing": b.printing,
+                  "origin": b.origin_kind, "parent": b.source_acquisition_id,
+                  "cost_status": b.cost_status, "original_unit_cost": b.original_unit_cost,
+                  "acquired_at": inv_svc._as_utc(b.acquired_at).isoformat()}
+                 for b in db.execute(select(AcquisitionLog).where(AcquisitionLog.catalog_card_id == card_id)
+                                     .order_by(AcquisitionLog.id)).scalars()],
+    }
+
+
+def _apply_traced(db, batch, row, card, mapped, qty, cost, acquired_at, mode, to_staging):
+    before = _stock_snapshot(db, card.id)
+    old_consumptions = {c.id for c in db.execute(select(FifoConsumption)).scalars()}
+    old_staged = {s.id for s in db.execute(select(StagingItem).where(StagingItem.import_batch_id == batch.id)).scalars()}
+    applied = _apply_row(db, batch, row, card, mapped, qty, cost, acquired_at, mode, to_staging)
+    after = _stock_snapshot(db, card.id)
+    row.effects = {"card_id": card.id, "before": before, "after": after,
+                   "staged_ids": [s.id for s in db.execute(select(StagingItem).where(StagingItem.import_batch_id == batch.id)).scalars() if s.id not in old_staged],
+                   "consumption_ids": [c.id for c in db.execute(select(FifoConsumption)).scalars()
+                                       if c.id not in old_consumptions]}
+    return applied
 
 
 def _apply_row(db: Session, batch: ImportBatch, row: ImportRow, card: CatalogCard,
@@ -194,25 +230,28 @@ def _apply_row(db: Session, batch: ImportBatch, row: ImportRow, card: CatalogCar
             InventoryItem.catalog_card_id == card.id,
             InventoryItem.condition == condition,
             InventoryItem.printing == printing,
+            func.lower(func.trim(InventoryItem.language)) == language,
             InventoryItem.deleted == False,  # noqa: E712
             InventoryItem.quantity > 0,
         )
+        if bin_name:
+            q = q.where(InventoryItem.bin == bin_name)
+        q = q.order_by(InventoryItem.id)
         items = db.execute(q).scalars().all()
-        if not items:
-            row.status = "error"
-            row.error = "deduction target not in inventory"
-            batch.error_count += 1
-            return 0
+        if sum(i.quantity for i in items) < qty:
+            raise HTTPException(409, "Not enough stock in the matching condition, printing, language and bin")
         remaining = qty
         for item in items:
             if remaining <= 0:
                 break
             take = min(item.quantity, remaining)
+            inv_svc.require_balanced_pool(db, item)
             inv_svc.apply_delta(db, item, -take, type="deduction",
                                 cause="csv_import",
                                 comment=f"order-export deduction (batch {batch.id})",
                                 source="platform")
-            inv_svc.consume_fifo(db, item, take)
+            inv_svc.consume_fifo(db, item, take, kind="import_deduction")
+            inv_svc.require_balanced_pool(db, item)
             remaining -= take
             row.inventory_id = item.id
         row.status = "imported"
@@ -243,7 +282,7 @@ def _apply_row(db: Session, batch: ImportBatch, row: ImportRow, card: CatalogCar
                               comment=f"overwrite import (batch {batch.id})",
                               acquired_at=acquired_at)
         elif delta < 0:
-            inv_svc.apply_delta(db, item, delta, type="adjustment",
+            inv_svc.adjust_stock(db, item, delta,
                                 cause="csv_import",
                                 comment=f"overwrite import (batch {batch.id})")
         row.status = "imported"
@@ -267,63 +306,75 @@ def resolve_ambiguous_row(db: Session, row: ImportRow, card_id: int,
         raise ValueError("unknown card")
     batch = row.batch
     mapped = row.mapped
-    try:
-        qty = int(float(mapped.get("quantity") or 1))
-    except ValueError:
-        qty = 1
-    cost = None
-    if mapped.get("cost"):
-        try:
-            cost = float(str(mapped["cost"]).replace("$", ""))
-        except ValueError:
-            pass
-    _apply_row(db, batch, row, card, mapped, qty, cost, _parse_acquired(mapped),
+    qty = whole(mapped.get("quantity"), "quantity", default=1)
+    cost = money(str(mapped["cost"]).replace("$", "") if mapped.get("cost") else None, "cost", default=None)
+    _apply_traced(db, batch, row, card, mapped, qty, cost, _parse_acquired(mapped),
                batch.mode, to_staging)
     db.commit()
 
 
 def undo_import(db: Session, batch: ImportBatch) -> dict:
-    """Undo an import within the configured window. Removes exactly the added
-    quantities (clamped at 0); warns on rows already sold/deleted."""
+    """Reverse exact import effects, atomically, or leave the batch untouched."""
     window = int(get_setting(db, "import_undo_window_minutes"))
     created = batch.created_at
     if created.tzinfo is None:
         created = created.replace(tzinfo=timezone.utc)
     if datetime.now(timezone.utc) - created > timedelta(minutes=window):
         raise ValueError(f"undo window ({window} min) has expired")
-    warnings = []
     undone = 0
-    for row in batch.rows:
-        if row.status == "staged":
-            staged = db.execute(select(StagingItem).where(
-                StagingItem.import_batch_id == batch.id)).scalars().all()
-            for s in staged:
-                db.delete(s)
+    # A savepoint also protects direct service callers that catch an error.
+    with db.begin_nested():
+        for row in sorted(batch.rows, key=lambda r: r.id, reverse=True):
+            if row.status == "staged":
+                ids = (row.effects or {}).get("staged_ids")
+                if not ids:
+                    raise ValueError("This staged import has no exact reversal record")
+                for identifier in ids:
+                    staged = db.get(StagingItem, identifier)
+                    if staged is None:
+                        raise ValueError("An imported staging row was already approved or removed; undo is blocked")
+                    db.delete(staged)
+                row.status = "undone"
+                undone += 1
+                continue
+            if row.status != "imported":
+                continue
+            effect = row.effects
+            if not effect:
+                raise ValueError("This legacy import has no exact reversal record. Review it in Reconciliation instead of guessing its cost lots.")
+            if _stock_snapshot(db, effect["card_id"]) != effect["after"]:
+                raise ValueError(f"Stock or costs changed after import row {row.id}; automatic undo is blocked. Review the changes first.")
+            before_lots = {b["id"]: b for b in effect["before"]["lots"]}
+            for cid in effect["consumption_ids"]:
+                consumption = db.get(FifoConsumption, cid)
+                if consumption is None:
+                    raise ValueError("An import allocation changed; undo is blocked.")
+                db.delete(consumption)
+            db.flush()
+            for after in effect["after"]["lots"]:
+                lot = db.get(AcquisitionLog, after["id"])
+                prior = before_lots.get(lot.id)
+                if prior:
+                    lot.quantity_remaining = prior["remaining"]
+                else:
+                    db.delete(lot)
+            before_items = {i["id"]: i for i in effect["before"]["items"]}
+            for after in effect["after"]["items"]:
+                item = db.get(InventoryItem, after["id"])
+                prior = before_items.get(item.id)
+                wanted = prior["quantity"] if prior else 0
+                if wanted != item.quantity:
+                    inv_svc.apply_delta(db, item, wanted - item.quantity, cause="undo",
+                                        comment=f"exact undo of import batch {batch.id}, row {row.id}")
+                if prior is None:
+                    item.deleted = True
+                else:
+                    item.current_price = prior["price"]
+                    item.comment = prior["comment"]
+            inv_svc.operation(db, "import_undo", f"Import batch {batch.id}, row {row.id}", effect)
             row.status = "undone"
             undone += 1
-            continue
-        if row.status != "imported" or not row.inventory_id:
-            continue
-        item = db.get(InventoryItem, row.inventory_id)
-        if item is None or item.deleted:
-            warnings.append(f"row {row.id}: item deleted, skipped")
-            continue
-        delta = row.quantity_applied
-        if delta > 0:
-            actual = inv_svc.apply_delta(db, item, -delta, type="deduction",
-                                         cause="undo",
-                                         comment=f"undo import batch {batch.id}")
-            # also unwind the acquisition lot(s) this import created, so undo
-            # doesn't leave phantom cost basis behind
-            inv_svc.unrecord_acquisition(db, item, -actual)
-            if -actual < delta:
-                warnings.append(
-                    f"row {row.id}: only {-actual}/{delta} removed (some already sold)")
-        elif delta < 0:
-            inv_svc.apply_delta(db, item, -delta, type="addition", cause="undo",
-                                comment=f"undo import batch {batch.id}")
-        row.status = "undone"
-        undone += 1
-    batch.status = "undone"
+            db.flush()
+        batch.status = "undone"
     db.commit()
-    return {"undone": undone, "warnings": warnings}
+    return {"undone": undone, "warnings": []}

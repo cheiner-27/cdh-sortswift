@@ -73,7 +73,7 @@ def audit(db) -> dict:
                   "acquisition_ids": [b.id for b in lots]}
         pool_rows.append(record)
         if remaining != stock:
-            issue("fifo_balance", f"{label}: stock {stock}, FIFO remaining {remaining}.", **record)
+            issue("fifo_balance", f"{label}: {stock} cards on hand, cost lots cover {remaining}.", **record)
         elif stock > active:
             issue("archived_stock", f"{label}: {stock - active} units are archived, with cost still retained.",
                   severity="warning", **record)
@@ -88,7 +88,8 @@ def audit(db) -> dict:
                   consumption_ids=[consumption.id], order_ids=[consumption.order_id])
     for batch in batches:
         used = sum(c.quantity for c in by_batch[batch.id])
-        if used + batch.quantity_remaining > batch.quantity:
+        transferred = sum(b.quantity for b in batches if b.source_acquisition_id == batch.id)
+        if used + batch.quantity_remaining + transferred > batch.quantity:
             issue("lot_overallocated", f"Lot #{batch.id}: remaining plus allocated exceeds its original quantity.",
                   acquisition_ids=[batch.id], quantity=batch.quantity,
                   remaining=batch.quantity_remaining, allocated=used)
@@ -131,20 +132,24 @@ def audit(db) -> dict:
     if uncovered:
         issue("sale_allocation", f"{len(uncovered)} order/pool combinations do not match their sold quantities; investigate missing cost history or reclassification.",
               severity="warning", orders=uncovered)
-    unattached = by_order[None]
+    unattached = [c for c in by_order[None] if c.kind in ("legacy", "sale", "sale_unlinked")]
     if unattached:
         issue("unclassified_outflow", f"{len(unattached)} FIFO outflows have no order link; they cannot prove a sale.",
               severity="warning", consumption_ids=[c.id for c in unattached],
               quantity=sum(c.quantity for c in unattached),
               cost=round(sum(c.quantity * c.unit_cost for c in unattached), 4))
     transfers = [l for l in logs if l.cause == "pull_from_bulk" and l.quantity_delta > 0]
-    if transfers:
+    transfer_keys = {pool_key(items_by_id[l.inventory_id]) for l in transfers if l.inventory_id in items_by_id}
+    legacy_transfer_lots = [b for b in batches if b.origin_kind == "legacy" and pool_key(b) in transfer_keys]
+    if legacy_transfer_lots:
         issue("purchase_provenance", "Purchase totals are reconstructed from acquisition lots. Bulk-to-card transfers create additional lots without purchase ancestry, so those totals can double-count the same purchase.",
               severity="warning", transfer_events=len(transfers),
-              transferred_units=sum(l.quantity_delta for l in transfers))
-    zero = [b for b in batches if b.unit_cost == 0 and b.quantity_remaining > 0]
+              transferred_units=sum(l.quantity_delta for l in transfers),
+              acquisition_ids=[b.id for b in legacy_transfer_lots])
+    zero = [b for b in batches if (b.quantity_remaining > 0 or by_batch[b.id]) and
+            (b.cost_status in ("unknown", "estimated") or (b.cost_status == "legacy" and b.unit_cost == 0))]
     if zero:
-        issue("zero_cost_review", "Remaining $0 lots do not distinguish verified zero cost from an unknown cost default.",
+        issue("zero_cost_review", "These lots have unknown, estimated or unverified zero costs. Review the cost and its supporting evidence.",
               severity="warning", acquisition_ids=[b.id for b in zero],
               quantity=sum(b.quantity_remaining for b in zero))
     active = [i for i in items if not i.deleted]

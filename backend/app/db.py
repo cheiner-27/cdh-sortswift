@@ -5,6 +5,7 @@ from pathlib import Path
 
 from sqlalchemy import create_engine, event
 from sqlalchemy.orm import DeclarativeBase, sessionmaker
+from fastapi import Request
 
 DATA_DIR = Path(os.environ.get("SORTSWIFT_DATA_DIR", Path(__file__).resolve().parent.parent / "data"))
 DATA_DIR.mkdir(parents=True, exist_ok=True)
@@ -31,12 +32,39 @@ class Base(DeclarativeBase):
     pass
 
 
-def get_db():
+def get_db(request: Request):
     db = SessionLocal()
     try:
+        # Serialize writes before reading quantities; prevent stale read/modify/write.
+        db.connection().exec_driver_sql("BEGIN" if request.method in ("GET", "HEAD", "OPTIONS") else "BEGIN IMMEDIATE")
         yield db
     finally:
         db.close()
+
+
+def ensure_reconciliation_schema(target):
+    """Additive bookkeeping metadata only; usable on an isolated audit copy."""
+    from sqlalchemy import inspect, text
+    from .models import InventoryOperation
+    InventoryOperation.__table__.create(target, checkfirst=True)
+    columns = {
+        "acquisition_log": {"origin_kind": "VARCHAR DEFAULT 'legacy'",
+            "source_acquisition_id": "INTEGER REFERENCES acquisition_log(id)",
+            "original_unit_cost": "FLOAT", "cost_status": "VARCHAR DEFAULT 'legacy'"},
+        "fifo_consumption": {"kind": "VARCHAR DEFAULT 'legacy'",
+            "order_item_id": "INTEGER REFERENCES order_items(id)"},
+        "import_rows": {"effects": "JSON"}, "order_items": {"deducted_quantity": "INTEGER"},
+    }
+    inspector = inspect(target)
+    tables = set(inspector.get_table_names())
+    with target.begin() as connection:
+        for table, additions in columns.items():
+            if table not in tables:
+                continue
+            existing = {c["name"] for c in inspector.get_columns(table)}
+            for name, definition in additions.items():
+                if name not in existing:
+                    connection.execute(text(f"ALTER TABLE {table} ADD COLUMN {name} {definition}"))
 
 
 def ensure_schema() -> None:
@@ -52,6 +80,7 @@ def ensure_schema() -> None:
     from .models import PricingConfig, TcgCatalogGroup, collector_number_key, name_key
 
     TcgCatalogGroup.__table__.create(engine, checkfirst=True)
+    ensure_reconciliation_schema(engine)
 
     insp = inspect(engine)
     tables = set(insp.get_table_names())

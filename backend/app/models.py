@@ -339,6 +339,10 @@ class AcquisitionLog(Base):
     quantity_remaining: Mapped[int] = mapped_column(Integer)  # unexhausted units
     unit_cost: Mapped[float] = mapped_column(Float, default=0.0)
     acquired_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, index=True)
+    origin_kind: Mapped[str] = mapped_column(String, default="purchase")
+    source_acquisition_id: Mapped[int | None] = mapped_column(ForeignKey("acquisition_log.id"), nullable=True)
+    original_unit_cost: Mapped[float | None] = mapped_column(Float, nullable=True)
+    cost_status: Mapped[str] = mapped_column(String, default="known")
 
 
 class FifoConsumption(Base):
@@ -350,6 +354,19 @@ class FifoConsumption(Base):
     quantity: Mapped[int] = mapped_column(Integer)
     unit_cost: Mapped[float] = mapped_column(Float)
     consumed_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    kind: Mapped[str] = mapped_column(String, default="sale")
+    order_item_id: Mapped[int | None] = mapped_column(ForeignKey("order_items.id"), nullable=True)
+
+
+class InventoryOperation(Base):
+    """Durable explanations and before/after evidence for cost changes and repairs."""
+    __tablename__ = "inventory_operations"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    request_id: Mapped[str | None] = mapped_column(String, nullable=True, unique=True)
+    kind: Mapped[str] = mapped_column(String, index=True)
+    reason: Mapped[str] = mapped_column(Text, default="")
+    details: Mapped[dict] = mapped_column(JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
 
 
 class InventoryLog(Base):
@@ -397,6 +414,7 @@ class ImportRow(Base):
     candidates: Mapped[list] = mapped_column(JSON, default=list)  # for ambiguous rows
     inventory_id: Mapped[int | None] = mapped_column(ForeignKey("inventory.id"), nullable=True)
     quantity_applied: Mapped[int] = mapped_column(Integer, default=0)
+    effects: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     batch: Mapped[ImportBatch] = relationship(back_populates="rows")
 
 
@@ -597,6 +615,7 @@ class OrderItem(Base):
     quantity: Mapped[int] = mapped_column(Integer, default=1)
     unit_price: Mapped[float] = mapped_column(Float, default=0.0)
     cogs: Mapped[float] = mapped_column(Float, default=0.0)  # filled by FIFO at deduction time
+    deducted_quantity: Mapped[int | None] = mapped_column(Integer, nullable=True)
     order: Mapped[Order] = relationship(back_populates="items")
     item: Mapped[InventoryItem | None] = relationship()
 

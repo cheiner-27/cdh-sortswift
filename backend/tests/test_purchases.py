@@ -132,8 +132,7 @@ def test_projected_profit_traces_revenue_back_to_the_lot(db, card):
 
 
 def test_purge_deleted_removes_rows_and_their_cost_basis(db, card):
-    """Soft delete leaves quantity and FIFO batches behind, so deleted stock kept
-    counting as unsold. Purging has to take the batches with it."""
+    """Disposal is explicit; emptying trash must retain original spending."""
     day = datetime(2026, 6, 26, tzinfo=timezone.utc)
     doomed = _lot(db, card, day=day, unit_cost=1.00, condition="NM", qty=10)
     keep = _lot(db, card, day=day, unit_cost=2.00, condition="LP", qty=1)
@@ -143,16 +142,22 @@ def test_purge_deleted_removes_rows_and_their_cost_basis(db, card):
     before = next(l for l in reports.purchase_lots(db) if l["unit_cost"] == 1.00)
     assert before["left"] == 10  # counted as unsold stock while only soft-deleted
 
+    import pytest
+    from fastapi import HTTPException
+    with pytest.raises(HTTPException, match="restore or dispose"):
+        inv.purge_deleted(db, preview=True)
+    inv.adjust_stock(db, doomed, -10, cause="reconciliation", comment="Reviewed disposal")
+    db.commit()
     preview = inv.purge_deleted(db, preview=True)
-    assert preview == {"items": 1, "item_ids": [doomed.id], "units": 10,
-                       "listings": 0, "log_entries_detached": 1, "batches": 1,
-                       "batch_units_remaining": 10, "batches_kept": 0,
+    assert preview == {"items": 1, "item_ids": [doomed.id], "units": 0,
+                       "listings": 0, "log_entries_detached": 2, "batches": 0,
+                       "batch_units_remaining": 0, "batches_kept": 1,
                        "preview": True}
     assert db.get(type(doomed), doomed.id) is not None  # preview touches nothing
 
     inv.purge_deleted(db)
     costs = [l["unit_cost"] for l in reports.purchase_lots(db)]
-    assert costs == [2.00]                       # the whole lot is gone
+    assert set(costs) == {1.00, 2.00}  # spending survives disposal and purge
     assert db.get(type(keep), keep.id) is not None
 
 
@@ -166,11 +171,13 @@ def test_purge_keeps_batches_a_live_row_still_needs(db, card):
     inv.add_stock(db, b, 2, 3.00, acquired_at=day)
     a.deleted = True
     db.commit()
-
+    inv.adjust_stock(db, a, -2, cause="reconciliation", comment="Reviewed disposal")
+    db.commit()
     summary = inv.purge_deleted(db)
     assert summary["items"] == 1
     assert summary["batches"] == 0 and summary["batches_kept"] == 2
     assert inv.fifo_unit_cost(db, b) == 3.00
+    assert inv.pool_balance(db, b) == (2, 2)
 
 
 def test_purchases_endpoint_totals(db, card):

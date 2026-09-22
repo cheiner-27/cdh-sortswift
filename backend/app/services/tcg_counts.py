@@ -471,12 +471,8 @@ def approve(db: Session, count: CycleCount):
         item = db.get(InventoryItem, line["inventory_id"])
         delta = line["counted"] - item.quantity
         if line["resolution"] == "accept_tcg" and delta:
-            inv.apply_delta(db, item, delta, type="adjustment", cause="tcg_reconcile",
+            inv.adjust_stock(db, item, delta, cause="tcg_reconcile",
                             comment=f"TCGplayer cycle count #{count.id}, row {line['id']}")
-            if delta > 0:
-                inv.record_acquisition(db, item, delta, None)
-            else:
-                inv.consume_fifo(db, item, -delta)
             adjusted += 1
         listing = inv.get_or_create_listing(db, item, "tcgplayer")
         listing.tcg_sku_id = line["sku"]

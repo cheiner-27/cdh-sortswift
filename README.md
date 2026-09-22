@@ -22,9 +22,9 @@ cd ..
 
 Run tests with `cd backend; python -m pytest tests`.
 
-Read-only inventory reconciliation: **Reports → Reconciliation**, or run
+Inventory reconciliation and reviewed repairs: **Reports → Reconciliation**, or run
 `python audit_inventory.py --output ../audit-output/inventory.json` from
-`backend`. `diagnose_reconciliation.py` reproduces known workflow defects in
+`backend`. `diagnose_reconciliation.py` checks stock/cost workflow invariants in
 disposable databases. See `frontend/public/docs/reconciliation.md` for scope
 and current limitations; these checks do not automatically repair history.
 

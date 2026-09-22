@@ -23,7 +23,7 @@ from app.services.marketplaces.sync import reverse_order_deduction
 def scenario():
     engine = create_engine("sqlite://")
     Base.metadata.create_all(engine)
-    with Session(engine) as db:
+    with Session(engine, autoflush=False) as db:
         card = CatalogCard(game="mtg", external_id="reconciliation-test", set_code="TEST",
                            name="Diagnostic card", collector_number="1")
         db.add(card); db.flush()

@@ -9,10 +9,11 @@ from datetime import datetime, timezone
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
+from fastapi import HTTPException
 
 from ...models import (
     InventoryItem, LotItem, MarketplaceAccount, MarketplaceListing, Order,
-    OrderItem, utcnow,
+    OrderItem, InventoryLog, FifoConsumption, AcquisitionLog, utcnow,
 )
 from .. import inventory as inv_svc
 from ..exporting import internal_sku
@@ -254,11 +255,14 @@ def apply_order_deduction(db: Session, order: Order) -> list[InventoryItem]:
         if item is None:
             continue
         line.inventory_id = item.id
+        inv_svc.require_balanced_pool(db, item)
         applied = inv_svc.apply_delta(
             db, item, -line.quantity, type="deduction", cause="sale",
             comment=f"{order.marketplace} order {order.external_order_id}",
             source="platform")
-        line.cogs = inv_svc.consume_fifo(db, item, -applied, order_id=order.id)
+        line.deducted_quantity = -applied
+        line.cogs = inv_svc.consume_fifo(db, item, -applied, order_id=order.id, order_item_id=line.id)
+        inv_svc.require_balanced_pool(db, item)
         touched.append(item)
     order.deduction_applied = True
     return touched
@@ -269,18 +273,51 @@ def reverse_order_deduction(db: Session, order: Order, cause: str = "refund",
     """Reverse an order's deduction (refund/return/cancel/replay)."""
     if not order.deduction_applied:
         return
+    allocations = db.execute(select(FifoConsumption).where(FifoConsumption.order_id == order.id)).scalars().all()
+    legacy_left = {}
+    restore = []
     for line in order.items:
         if not line.inventory_id:
             continue
         item = db.get(InventoryItem, line.inventory_id)
         if item is None:
             continue
+        quantity = line.deducted_quantity
+        if quantity is None:
+            if item.id not in legacy_left:
+                history = [h for h in db.execute(select(InventoryLog).where(InventoryLog.inventory_id == item.id)).scalars()
+                           if order.external_order_id in (h.comment or "")]
+                if not history:
+                    raise HTTPException(409, "This legacy sale has no exact stock reversal trail. Review its allocations in Reconciliation first.")
+                legacy_left[item.id] = max(0, -sum(h.quantity_delta for h in history))
+            quantity = min(line.quantity, legacy_left[item.id])
+            legacy_left[item.id] -= quantity
+        restore.append((line, item, quantity))
+    expected, costed = {}, {}
+    for line, item, quantity in restore:
+        key = inv_svc.pool_key(item)
+        expected[key] = expected.get(key, 0) + quantity
+    for allocation in allocations:
+        batch = db.get(AcquisitionLog, allocation.acquisition_id)
+        key = inv_svc.pool_key(batch)
+        costed[key] = costed.get(key, 0) + allocation.quantity
+    if any(costed.get(key, 0) != expected.get(key, 0) for key in expected.keys() | costed.keys()):
+        raise HTTPException(409, "This sale has missing or reclassified cost allocations. Repair its sale costs in Reconciliation before reversing it.")
+    inv_svc.operation(db, "order_reversal", comment or cause, {"order_id": order.id,
+        "lines": [{"line_id": l.id, "inventory_id": i.id, "quantity": q, "cogs": l.cogs} for l, i, q in restore],
+        "allocations": [{"lot_id": a.acquisition_id, "quantity": a.quantity, "cost": a.unit_cost} for a in allocations]})
+    for line, item, quantity in restore:
+        inv_svc.require_balanced_pool(db, item)
+    for line, item, quantity in restore:
         inv_svc.apply_delta(
-            db, item, line.quantity, type="addition", cause=cause,
+            db, item, quantity, type="addition", cause=cause,
             comment=comment or f"reverse {order.marketplace} order {order.external_order_id}",
             source="platform")
         line.cogs = 0.0
+        line.deducted_quantity = 0
     inv_svc.restore_fifo(db, order.id)
+    for line, item, quantity in restore:
+        inv_svc.require_balanced_pool(db, item)
     order.deduction_applied = False
 
 

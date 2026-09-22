@@ -1,18 +1,18 @@
 """Inventory service: quantity mutations, audit logging, FIFO costing.
 
-Every quantity change flows through apply_delta() so the audit log is
-complete by construction. FIFO consumption/restoration is separate and
-only used for sale deductions (and their reversals).
+Quantity and cost changes are paired by the public stock operations. Cost
+allocations distinguish sales, adjustments and supplier returns.
 """
 from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
+from fastapi import HTTPException
 
 from ..domain import normalize_language
 from ..models import (
     AcquisitionLog, FifoConsumption, InventoryItem, InventoryLog,
-    MarketplaceListing, utcnow,
+    MarketplaceListing, InventoryOperation, utcnow,
 )
 
 
@@ -99,6 +99,7 @@ def apply_delta(
 def record_acquisition(
     db: Session, item: InventoryItem, quantity: int, unit_cost: float | None,
     acquired_at: datetime | None = None,
+    *, origin_kind: str = "purchase", cost_status: str | None = None,
 ) -> AcquisitionLog:
     """Record a FIFO cost batch for units being added."""
     entry = AcquisitionLog(
@@ -111,10 +112,51 @@ def record_acquisition(
         quantity_remaining=quantity,
         unit_cost=unit_cost or 0.0,
         acquired_at=acquired_at or utcnow(),
+        origin_kind=origin_kind, original_unit_cost=unit_cost,
+        cost_status=cost_status or ("known" if unit_cost is not None else "unknown"),
     )
     db.add(entry)
     db.flush()
     return entry
+
+
+def operation(db, kind, reason, details):
+    entry = InventoryOperation(kind=kind, reason=reason, details=details)
+    db.add(entry)
+    return entry
+
+
+def pool_balance(db, item):
+    db.flush()
+    key = pool_key(item)
+    stock = sum(i.quantity for i in db.execute(select(InventoryItem).where(
+        InventoryItem.catalog_card_id == key[0], InventoryItem.custom_sku_id == key[1],
+        InventoryItem.condition == key[2], InventoryItem.printing == key[3])).scalars())
+    remaining = sum(b.quantity_remaining for b in _fifo_batches(db, item))
+    return stock, remaining
+
+
+def require_balanced_pool(db, item):
+    stock, remaining = pool_balance(db, item)
+    if stock != remaining:
+        raise HTTPException(409, f"{item_description(item)} has {stock} stock units but {remaining} costed units. "
+                            "Use Reports → Reconciliation → Review repair before changing its quantity.")
+
+
+def adjust_stock(db, item, delta, *, unit_cost=None, cause="manual", comment="", source="staff",
+                 acquired_at=None):
+    """Change stock and its cost breakdown together, including non-sale losses."""
+    require_balanced_pool(db, item)
+    applied = apply_delta(db, item, delta, type="adjustment", cause=cause, comment=comment, source=source,
+                          cost_at=unit_cost if delta > 0 else None)
+    if applied > 0:
+        record_acquisition(db, item, applied, unit_cost, acquired_at, origin_kind="adjustment")
+    elif applied < 0:
+        cost = consume_fifo(db, item, -applied, kind="adjustment")
+        operation(db, "stock_adjustment", comment or cause,
+                  {"inventory_id": item.id, "quantity_delta": applied, "cost_removed": cost})
+    require_balanced_pool(db, item)
+    return applied
 
 
 def add_stock(
@@ -145,7 +187,7 @@ def _fifo_batches(db: Session, item: InventoryItem):
 
 
 def consume_fifo(db: Session, item: InventoryItem, quantity: int,
-                 order_id: int | None = None) -> float:
+                 order_id: int | None = None, *, kind="sale", order_item_id=None) -> float:
     """Consume `quantity` units from oldest acquisition batches. Returns total COGS.
 
     If acquisition history is short (e.g. migrated inventory without cost
@@ -163,8 +205,54 @@ def consume_fifo(db: Session, item: InventoryItem, quantity: int,
         db.add(FifoConsumption(
             acquisition_id=batch.id, order_id=order_id,
             quantity=take, unit_cost=batch.unit_cost,
+            kind=kind, order_item_id=order_item_id,
         ))
     return total_cogs
+
+
+def root_batch(db, batch):
+    seen = set()
+    while batch.source_acquisition_id:
+        if batch.id in seen:
+            raise HTTPException(409, "Purchase ancestry contains a cycle; review the linked lots.")
+        seen.add(batch.id)
+        parent = db.get(AcquisitionLog, batch.source_acquisition_id)
+        if parent is None:
+            raise HTTPException(409, "Purchase ancestry refers to a missing lot.")
+        batch = parent
+    return batch
+
+
+def transfer_cost_slice(db, batch, target, quantity, *, unit_cost=None, origin_kind="transfer"):
+    """Move a slice with durable purchase ancestry; it is never a new purchase."""
+    batch.quantity_remaining -= quantity
+    child = AcquisitionLog(catalog_card_id=target.catalog_card_id, custom_sku_id=target.custom_sku_id,
+        condition=target.condition, printing=target.printing, language=target.language,
+        quantity=quantity, quantity_remaining=quantity,
+        unit_cost=batch.unit_cost if unit_cost is None else unit_cost,
+        original_unit_cost=None, acquired_at=batch.acquired_at, origin_kind=origin_kind,
+        source_acquisition_id=batch.id, cost_status=batch.cost_status if unit_cost is None else "known")
+    db.add(child)
+    db.flush()
+    return child
+
+
+def set_remaining_cost(db, item, unit_cost):
+    """Correct this row's assigned remaining slices without creating stock."""
+    require_balanced_pool(db, item)
+    if any(i.id != item.id and i.quantity > 0 and pool_key(i) == pool_key(item)
+           for i in db.execute(select(InventoryItem)).scalars()):
+        raise HTTPException(409, "Costs are shared across this card's bins and languages. Use Reports → Reconciliation to review a lot cost, or merge compatible rows before editing its cost.")
+    changes = []
+    for batch, quantity in allocated_slices(db, [item])[item.id]:
+        old = batch.unit_cost
+        child = transfer_cost_slice(db, batch, item, quantity, unit_cost=unit_cost,
+                                    origin_kind="cost_adjustment")
+        changes.append({"source_lot": batch.id, "lot": child.id, "quantity": quantity,
+                        "old_cost": old, "new_cost": unit_cost})
+    operation(db, "cost_edit", "Bulk cost edit", {"inventory_id": item.id, "changes": changes})
+    log_mutation(db, item, "adjustment", 0, cause="cost_edit", comment="Updated remaining unit cost; purchase history preserved")
+    require_balanced_pool(db, item)
 
 
 def return_to_supplier(db: Session, item: InventoryItem, quantity: int,
@@ -174,11 +262,13 @@ def return_to_supplier(db: Session, item: InventoryItem, quantity: int,
     acquisition batches (oldest first) without booking a sale/COGS — the cost is
     recovered, not lost, so there's no P&L hit. Returns units removed + cost
     recovered."""
+    require_balanced_pool(db, item)
     applied = apply_delta(db, item, -abs(quantity), type="deduction",
                           cause="return_to_supplier",
                           comment=comment or "returned to supplier (full refund)")
     remaining = -applied
     cost_recovered = 0.0
+    adjustments = []
     for batch in _fifo_batches(db, item):
         if remaining <= 0:
             break
@@ -186,6 +276,14 @@ def return_to_supplier(db: Session, item: InventoryItem, quantity: int,
         batch.quantity_remaining -= take
         remaining -= take
         cost_recovered += take * batch.unit_cost
+        root = root_batch(db, batch)
+        if root.original_unit_cost is None:
+            root.original_unit_cost = root.unit_cost
+        adjustments.append({"root_id": root.id, "amount": -take * batch.unit_cost})
+        db.add(FifoConsumption(acquisition_id=batch.id, quantity=take,
+                               unit_cost=batch.unit_cost, kind="supplier_return"))
+    operation(db, "supplier_refund", comment or "Full supplier return", {"purchase_adjustments": adjustments})
+    require_balanced_pool(db, item)
     return {"units": -applied, "cost_recovered": round(cost_recovered, 2)}
 
 
@@ -201,6 +299,7 @@ def reduce_cost_basis(db: Session, item: InventoryItem, refund_amount: float,
     remaining = float(refund_amount)
     applied_total = 0.0
     batches_touched = 0
+    adjustments = []
     for batch in _fifo_batches(db, item):  # oldest first
         if remaining <= 1e-9:
             break
@@ -208,6 +307,10 @@ def reduce_cost_basis(db: Session, item: InventoryItem, refund_amount: float,
         take = min(remaining, batch_cost)
         if take <= 0:
             continue
+        root = root_batch(db, batch)
+        if root.original_unit_cost is None:
+            root.original_unit_cost = root.unit_cost
+        adjustments.append({"root_id": root.id, "amount": -take})
         batch.unit_cost = round((batch_cost - take) / batch.quantity_remaining, 4)
         remaining -= take
         applied_total += take
@@ -217,35 +320,24 @@ def reduce_cost_basis(db: Session, item: InventoryItem, refund_amount: float,
     log_mutation(db, item, "adjustment", 0, cause="supplier_refund",
                  comment=comment or f"partial supplier refund ${applied_total:.2f} "
                  f"applied FIFO (oldest cost first) across {batches_touched} batch(es)")
+    operation(db, "supplier_refund", comment or "Partial supplier refund", {"purchase_adjustments": adjustments})
     return {"applied": round(applied_total, 2), "batches": batches_touched,
             "unapplied": round(max(0.0, remaining), 2)}
 
 
 def purge_deleted(db: Session, preview: bool = False) -> dict:
-    """Empty the trash: permanently remove soft-deleted rows and their cost basis.
+    """Remove empty archived rows, retaining purchase costs and transfer ancestry.
 
-    Soft delete only flips a flag — the row keeps its quantity and its FIFO
-    batches — so deleted stock still reads as unsold in any batch-level roll-up
-    (it inflated "units unsold" on Purchases by 4,103 units before this existed).
-
-    A batch is dropped only when its pool has no live rows left AND nothing has
-    ever consumed it; otherwise removing it would strip cost basis off a live row
-    or orphan a sale's FIFO link, so it stays and is reported in ``batches_kept``.
-    Audit entries are detached rather than deleted — each carries its own item
-    description, so the trail outlives the row it described.
+    Stock must be restored or explicitly disposed of first. Journal descriptions
+    survive detached from the purged rows. Foreign keys protect sale references.
     """
     items = db.execute(select(InventoryItem).where(
         InventoryItem.deleted == True)).scalars().all()  # noqa: E712
-    live_pools = {pool_key(i) for i in db.execute(select(InventoryItem).where(
-        InventoryItem.deleted == False)).scalars()}  # noqa: E712
-    consumed = {c.acquisition_id for c in db.execute(select(FifoConsumption)).scalars()}
-
+    if any(i.quantity for i in items):
+        raise HTTPException(409, "Archived rows still contain stock. Use Reports → Reconciliation to restore or dispose of those units before emptying trash. Purchase history is retained.")
     purged_pools = {pool_key(i) for i in items}
-    dead_pools = purged_pools - live_pools
     pool_batches = [b for b in db.execute(select(AcquisitionLog)).scalars()
                     if pool_key(b) in purged_pools]
-    droppable = [b for b in pool_batches
-                 if pool_key(b) in dead_pools and b.id not in consumed]
     ids = [i.id for i in items]
     logs = db.execute(select(InventoryLog).where(
         InventoryLog.inventory_id.in_(ids))).scalars().all() if ids else []
@@ -255,9 +347,8 @@ def purge_deleted(db: Session, preview: bool = False) -> dict:
         "units": sum(i.quantity for i in items),
         "listings": sum(len(i.listings) for i in items),
         "log_entries_detached": len(logs),
-        "batches": len(droppable),
-        "batch_units_remaining": sum(b.quantity_remaining for b in droppable),
-        "batches_kept": len(pool_batches) - len(droppable),
+        "batches": 0, "batch_units_remaining": 0,
+        "batches_kept": len(pool_batches),
         "preview": preview,
     }
     if preview:
@@ -265,8 +356,6 @@ def purge_deleted(db: Session, preview: bool = False) -> dict:
 
     for log in logs:
         log.inventory_id = None
-    for batch in droppable:
-        db.delete(batch)
     for item in items:
         for listing in item.listings:
             db.delete(listing)
@@ -287,15 +376,10 @@ def split_cost_basis(db: Session, source: InventoryItem, target: InventoryItem,
         if remaining <= 0:
             break
         take = min(batch.quantity_remaining, remaining)
-        batch.quantity_remaining -= take
         remaining -= take
         moved_cost += take * batch.unit_cost
-        db.add(AcquisitionLog(
-            catalog_card_id=target.catalog_card_id,
-            custom_sku_id=target.custom_sku_id,
-            condition=target.condition, printing=target.printing,
-            language=target.language, quantity=take, quantity_remaining=take,
-            unit_cost=batch.unit_cost, acquired_at=batch.acquired_at))
+        if pool_key(source) != pool_key(target):
+            transfer_cost_slice(db, batch, target, take)
     return round(moved_cost, 4)
 
 
@@ -359,15 +443,9 @@ def rekey_cost_basis(db: Session, item: InventoryItem, *, old_condition: str,
         if remaining <= 0:
             break
         take = min(batch.quantity_remaining, remaining)
-        batch.quantity_remaining -= take
         remaining -= take
         moved += take * batch.unit_cost
-        db.add(AcquisitionLog(
-            catalog_card_id=item.catalog_card_id,
-            custom_sku_id=item.custom_sku_id,
-            condition=item.condition, printing=item.printing,
-            language=item.language, quantity=take, quantity_remaining=take,
-            unit_cost=batch.unit_cost, acquired_at=batch.acquired_at))
+        transfer_cost_slice(db, batch, item, take)
     log_mutation(db, item, "adjustment", 0, cause="manual",
                  comment=f"reclassified {old_condition}/{old_printing} -> "
                  f"{item.condition}/{item.printing} "
@@ -402,6 +480,7 @@ def restore_fifo(db: Session, order_id: int) -> None:
             batch.quantity_remaining = min(
                 batch.quantity, batch.quantity_remaining + row.quantity)
         db.delete(row)
+    db.flush()
 
 
 def oldest_acquisition_date(db: Session, item: InventoryItem) -> datetime | None:
@@ -454,8 +533,34 @@ def lot_pool_keys(db: Session, date: str, unit_cost: float | None = None) -> set
     return {pool_key(b) for b in db.execute(q).scalars()}
 
 
+def allocated_slices(db, items):
+    """Allocate against the entire stock pool, so filtering cannot change value."""
+    keys = {pool_key(i) for i in items}
+    wanted = {i.id for i in items}
+    rows = [i for i in db.execute(select(InventoryItem).order_by(InventoryItem.id)).scalars()
+            if pool_key(i) in keys]
+    pools = {}
+    for batch in db.execute(select(AcquisitionLog).where(AcquisitionLog.quantity_remaining > 0)
+                            .order_by(AcquisitionLog.acquired_at, AcquisitionLog.id)).scalars():
+        if pool_key(batch) in keys:
+            pools.setdefault(pool_key(batch), []).append(batch)
+    claimed, out = {}, {i.id: [] for i in items}
+    for row in rows:
+        needed = max(0, row.quantity)
+        for batch in pools.get(pool_key(row), []):
+            take = min(needed, batch.quantity_remaining - claimed.get(batch.id, 0))
+            if take > 0:
+                claimed[batch.id] = claimed.get(batch.id, 0) + take
+                needed -= take
+                if row.id in wanted:
+                    out[row.id].append((batch, take))
+            if not needed:
+                break
+    return out
+
+
 def fifo_rollup(db: Session, items: list[InventoryItem]) -> dict[int, dict]:
-    """Per-item FIFO facts for a whole result set in ONE query.
+    """Per-item FIFO facts from batched queries over the full stock pool.
 
     Returns ``{item_id: {"unit_cost", "age_days", "cost_basis"}}``. ``unit_cost``
     and ``age_days`` match fifo_unit_cost() / inventory_age_days() for a single
@@ -472,7 +577,7 @@ def fifo_rollup(db: Session, items: list[InventoryItem]) -> dict[int, dict]:
 
     ``cost_basis`` is the remaining cost of *this item's* on-hand units: walk
     the pool oldest-first and take ``quantity`` units. Allocation is shared
-    across the items handed in, because a pool spans bins and languages — two
+    across all stored rows, because a pool spans bins and languages — two
     bins of the same card+condition+printing draw on the same batches, so
     valuing each one independently would count the same dollars twice.
     """
@@ -496,29 +601,18 @@ def fifo_rollup(db: Session, items: list[InventoryItem]) -> dict[int, dict]:
             pool.sort(key=lambda b: (_as_utc(b.acquired_at), b.id))
 
     now = datetime.now(timezone.utc)
-    claimed: dict[int, int] = {}  # batch id -> units already assigned to an item
+    assigned = allocated_slices(db, items)
     out: dict[int, dict] = {}
     for item in sorted(items, key=lambda i: i.id):  # stable allocation order
         key = _pool_key(item)
         pool = pools.get(key, [])
         oldest = pool[0] if pool else None
         priced_at = oldest or last_spent.get(key)
-        needed = max(0, item.quantity)
-        cost_basis = 0.0
-        for batch in pool:
-            if needed <= 0:
-                break
-            take = min(batch.quantity_remaining - claimed.get(batch.id, 0), needed)
-            if take <= 0:
-                continue
-            claimed[batch.id] = claimed.get(batch.id, 0) + take
-            needed -= take
-            cost_basis += take * batch.unit_cost
         out[item.id] = {
             "unit_cost": priced_at.unit_cost if priced_at else None,
             "age_days": (max(0, (now - _as_utc(oldest.acquired_at)).days)
                          if oldest else None),
-            "cost_basis": round(cost_basis, 2),
+            "cost_basis": round(sum(b.unit_cost * q for b, q in assigned[item.id]), 4),
         }
     return out
 

@@ -386,13 +386,14 @@ function DetailModal({ meta, item, returnCount, onClose, onSplit, onMsg }) {
       </p>}
       {(it.acquisitions || []).length === 0
         ? <p className="muted">No cost lots recorded (added without a cost).</p>
-        : <table><thead><tr><th>Acquired</th><th>Qty</th><th>Remaining</th><th>Unit cost</th><th>Lot value</th></tr></thead>
+        : <table><thead><tr><th>Lot / origin</th><th>Acquired</th><th>Qty</th><th>Remaining</th><th>Unit cost</th><th>Lot value</th></tr></thead>
           <tbody>{it.acquisitions.map((a) => (
             <tr key={a.id}>
+              <td>#{a.id} · {a.origin_kind}{a.source_acquisition_id && ` (from #${a.source_acquisition_id})`}</td>
               <td>{a.acquired_at ? a.acquired_at.slice(0, 10) : '—'}</td>
               <td>{a.quantity}</td>
               <td>{a.quantity_remaining}</td>
-              <td>{fmtMoney(a.unit_cost)}</td>
+              <td>{a.cost_status === 'unknown' ? 'Unknown' : fmtMoney(a.unit_cost)}{a.cost_status === 'estimated' ? ' (estimated)' : a.cost_status === 'legacy' && a.unit_cost === 0 ? ' (unverified)' : ''}</td>
               <td className="muted">{fmtMoney(a.quantity_remaining * a.unit_cost)}</td>
             </tr>))}</tbody></table>}
       <p className="muted" style={{ fontSize: 12 }}>Lots are shared by all rows with this card, condition and printing, including other bins, languages and archived rows. Qty is the original lot quantity; Remaining is the outstanding balance. A lot may come from a purchase, an adjustment or a transfer. It does not always represent a new purchase.</p>

@@ -179,6 +179,8 @@ def detail(item_id: int, db: Session = Depends(get_db)):
         "acquired_at": a.acquired_at.isoformat() if a.acquired_at else None,
         "quantity": a.quantity, "quantity_remaining": a.quantity_remaining,
         "unit_cost": a.unit_cost,
+        "cost_status": a.cost_status, "origin_kind": a.origin_kind,
+        "source_acquisition_id": a.source_acquisition_id,
     } for a in lots]
     d["history"] = [{
         "id": h.id, "type": h.type, "quantity_delta": h.quantity_delta,
@@ -266,13 +268,10 @@ def adjust(payload: dict = Body(...), db: Session = Depends(get_db)):
             delta = whole(adj["delta"], "delta", min_value=None)
         else:
             delta = 0
-        applied = inv_svc.apply_delta(db, item, delta, type="adjustment",
+        applied = inv_svc.adjust_stock(db, item, delta,
                                       cause=adj.get("cause", "manual"),
-                                      comment=comment)
-        if applied > 0:
-            inv_svc.record_acquisition(
-                db, item, applied,
-                money(adj.get("unit_cost"), "unit_cost", default=None))
+                                      comment=comment,
+                                      unit_cost=money(adj.get("unit_cost"), "unit_cost", default=None))
         results.append({"inventory_id": item.id, "applied": applied,
                         "quantity": item.quantity})
     db.commit()
@@ -360,12 +359,9 @@ def bulk_edit(payload: dict = Body(...), db: Session = Depends(get_db)):
             inv_svc.rekey_cost_basis(db, item, old_condition=old_condition,
                                      old_printing=old_printing)
         if qty_delta:
-            applied = inv_svc.apply_delta(db, item, qty_delta, type="adjustment",
-                                          cause="bulk_update")
-            if applied > 0:
-                inv_svc.record_acquisition(db, item, applied, backfill)
-        elif backfill is not None and item.quantity > 0:
-            inv_svc.record_acquisition(db, item, item.quantity, backfill)
+            inv_svc.adjust_stock(db, item, qty_delta, cause="bulk_update", unit_cost=backfill)
+        if backfill is not None and item.quantity > 0:
+            inv_svc.set_remaining_cost(db, item, backfill)
         item.updated_at = utcnow()
         for l in item.listings:
             l.dirty = True
@@ -429,6 +425,10 @@ def split(item_id: int, payload: dict = Body(...), db: Session = Depends(get_db)
     target = inv_svc.find_or_create_item(
         db, catalog_card_id=item.catalog_card_id, custom_sku_id=item.custom_sku_id,
         bin=item.bin, **new_attrs)
+    if target.id == item.id:
+        raise HTTPException(400, "The selected attributes resolve to this same record")
+    inv_svc.require_balanced_pool(db, item)
+    inv_svc.require_balanced_pool(db, target)
     # Move the units AND their FIFO cost basis (oldest first, preserving cost +
     # acquisition date) so a split never duplicates or resets cost/age.
     moved_cost = inv_svc.split_cost_basis(db, item, target, qty)
@@ -684,17 +684,21 @@ def approve_cycle_count(count_id: int, db: Session = Depends(get_db)):
         raise HTTPException(409, "This count is no longer editable")
     adjusted = 0
     for line in count.lines:
+        if line.counted is None:
+            continue
+        item = db.get(InventoryItem, line.inventory_id)
+        if not item or item.deleted or item.quantity != line.expected:
+            raise HTTPException(409, "Stock changed since this count started. Start a fresh count before approving.")
+    for line in count.lines:
         if line.counted is None or line.counted == line.expected:
             continue
         item = db.get(InventoryItem, line.inventory_id)
         if not item:
             continue
         delta = line.counted - item.quantity
-        applied = inv_svc.apply_delta(db, item, delta, type="adjustment",
+        applied = inv_svc.adjust_stock(db, item, delta,
                                       cause="cycle_count",
                                       comment=f"cycle count #{count.id} bin '{count.bin}'")
-        if applied > 0:
-            inv_svc.record_acquisition(db, item, applied, None)
         adjusted += 1
     count.status = "completed"
     count.completed_at = utcnow()

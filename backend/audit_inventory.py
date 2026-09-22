@@ -1,6 +1,7 @@
 """Usage: python audit_inventory.py --output ../audit-output/inventory.json
 
-Opens SQLite in read-only mode. Does not import app.main or run migrations.
+Opens the source read-only and audits an in-memory copy. New bookkeeping
+columns are added only to that copy; the source is never migrated or changed.
 """
 import argparse
 import json
@@ -9,6 +10,8 @@ import sqlite3
 
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
+from sqlalchemy.pool import StaticPool
+from app.db import Base, ensure_reconciliation_schema
 
 from app.services.reconciliation import audit
 
@@ -20,12 +23,14 @@ def main():
     args = parser.parse_args()
     path = args.database.resolve()
     uri = path.as_uri() + "?mode=ro"
-    # A real SQLite read transaction keeps every check on the same snapshot.
-    def connect():
-        connection = sqlite3.connect(uri, uri=True)
-        connection.execute("BEGIN")
-        return connection
-    engine = create_engine("sqlite://", creator=connect)
+    # Copy the read-only source consistently; add new metadata only to memory
+    # so older backups remain auditable without migrating the source file.
+    memory = sqlite3.connect(":memory:")
+    with sqlite3.connect(uri, uri=True) as source:
+        source.backup(memory)
+    engine = create_engine("sqlite://", creator=lambda: memory, poolclass=StaticPool)
+    Base.metadata.create_all(engine)
+    ensure_reconciliation_schema(engine)
     with Session(engine) as db:
         report = audit(db)
         report["database"] = str(path)
