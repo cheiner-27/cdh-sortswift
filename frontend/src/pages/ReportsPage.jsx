@@ -1,4 +1,5 @@
 import React, { useEffect, useState } from 'react'
+import { Link } from 'react-router-dom'
 import { api, fmtMoney } from '../api.js'
 import { Field, SortTh, useSort } from '../components.jsx'
 
@@ -8,6 +9,21 @@ export default function ReportsPage() {
   const [aging, setAging] = useState(null)
   const [locations, setLocations] = useState([])
   const [expenses, setExpenses] = useState(null)
+  const [reconciliation, setReconciliation] = useState(null)
+  const [auditError, setAuditError] = useState('')
+  const [auditing, setAuditing] = useState(false)
+  const runAudit = async () => {
+    setAuditing(true); setAuditError('')
+    try { setReconciliation(await api.get('/api/reports/reconciliation')) }
+    catch (e) { setAuditError(e.message || String(e)) }
+    finally { setAuditing(false) }
+  }
+  const downloadAudit = () => {
+    const url = URL.createObjectURL(new Blob([JSON.stringify(reconciliation, null, 2)], { type: 'application/json' }))
+    const link = document.createElement('a')
+    link.href = url; link.download = `inventory-reconciliation-${new Date().toISOString().slice(0, 10)}.json`
+    link.click(); URL.revokeObjectURL(url)
+  }
   const pnlSort = useSort(pnl)
   const locSort = useSort(locations)
 
@@ -16,6 +32,7 @@ export default function ReportsPage() {
     api.get('/api/reports/aging').then(setAging)
     api.get('/api/reports/locations').then(setLocations)
     api.get('/api/expenses/summary').then(setExpenses)
+    runAudit()
   }, [])
 
   const salesProfit = pnl.reduce((s, r) => s + (r.profit || 0), 0)
@@ -27,6 +44,31 @@ export default function ReportsPage() {
   return (
     <div>
       <h2>Reports</h2>
+
+      <div className="panel">
+        <div className="row center">
+          <h3 style={{ margin: 0 }}>Reconciliation</h3>
+          <button disabled={auditing} onClick={runAudit}>{auditing ? 'Checking…' : 'Run checks'}</button>
+          {reconciliation && <button onClick={downloadAudit}>Download audit</button>}
+        </div>
+        <p className="muted">Read-only checks of stock, signed history, FIFO lot balances and sales allocations. No quantities or costs are changed.</p>
+        {auditError && <p style={{ color: 'var(--red)' }}>Audit failed: {auditError}</p>}
+        {reconciliation && <>
+          <p style={{ color: reconciliation.summary.errors ? 'var(--red)' : undefined }}>
+            <b>{reconciliation.summary.errors} discrepancies</b> · {reconciliation.summary.warnings} review notes · {reconciliation.summary.inventory_rows} inventory rows · {reconciliation.summary.orders_checked} orders checked
+          </p>
+          <p>{reconciliation.summary.history_mismatches} stock/history mismatches · {reconciliation.summary.fifo_mismatches} stock/FIFO mismatches.</p>
+          <p className="muted">{reconciliation.summary.migrated_orders_without_lot_links} migrated orders carry historical COGS without lot links ({fmtMoney(reconciliation.summary.migrated_cogs)}). Their costs are preserved and reported separately.</p>
+          <div className="table-wrap"><table><thead><tr><th>Check</th><th>Finding</th><th>Records</th></tr></thead>
+            <tbody>{reconciliation.issues.map((issue, index) => <tr key={index}>
+              <td><span className="badge" style={{ color: issue.severity === 'error' ? 'var(--red)' : undefined }}>{issue.severity === 'error' ? 'Discrepancy' : 'Review'}</span></td>
+              <td>{issue.message}</td>
+              <td>{(issue.inventory_ids || []).map(id => <Link key={id} style={{ marginRight: 8 }} to={`/inventory?item=${id}`}>Inventory #{id}</Link>)}
+                {(issue.order_ids || []).map(id => <span key={id}>Order #{id} </span>)}</td>
+            </tr>)}</tbody></table></div>
+          <p className="muted">Balanced records do not verify purchase invoices or physical counts. Legacy transfer lots and unknown costs still need review before relying on purchase totals.</p>
+        </>}
+      </div>
 
       <div className="stats">
         <div className="stat"><div className="value" style={{ color: salesProfit >= 0 ? 'var(--green)' : 'var(--red)' }}>{fmtMoney(salesProfit)}</div>

@@ -380,6 +380,10 @@ function DetailModal({ meta, item, returnCount, onClose, onSplit, onMsg }) {
       </div>
 
       <h3>Acquisition lots <span className="muted">(FIFO — oldest sells first)</span></h3>
+      {it.reconciliation && <p style={{ color: it.reconciliation.difference ? 'var(--red)' : undefined }}>
+        Stock in this FIFO pool: <b>{it.reconciliation.pool_quantity}</b> · Lot units remaining: <b>{it.reconciliation.lot_remaining}</b>
+        {it.reconciliation.difference !== 0 && <> · <b>Mismatch: {it.reconciliation.difference > 0 ? '+' : ''}{it.reconciliation.difference} lot units.</b> Review Reports → Reconciliation before correcting costs.</>}
+      </p>}
       {(it.acquisitions || []).length === 0
         ? <p className="muted">No cost lots recorded (added without a cost).</p>
         : <table><thead><tr><th>Acquired</th><th>Qty</th><th>Remaining</th><th>Unit cost</th><th>Lot value</th></tr></thead>
@@ -391,7 +395,7 @@ function DetailModal({ meta, item, returnCount, onClose, onSplit, onMsg }) {
               <td>{fmtMoney(a.unit_cost)}</td>
               <td className="muted">{fmtMoney(a.quantity_remaining * a.unit_cost)}</td>
             </tr>))}</tbody></table>}
-      <p className="muted" style={{ fontSize: 12 }}>Each row is a separate purchase batch with its own date &amp; cost. Sales consume the oldest remaining lot first; that oldest lot also drives inventory age.</p>
+      <p className="muted" style={{ fontSize: 12 }}>Lots are shared by all rows with this card, condition and printing, including other bins, languages and archived rows. Qty is the original lot quantity; Remaining is the outstanding balance. A lot may come from a purchase, an adjustment or a transfer. It does not always represent a new purchase.</p>
 
       <h3>Supplier refund / return <span className="muted">(a refund to you on a purchase)</span></h3>
       <div className="row center">
@@ -438,6 +442,11 @@ function DetailModal({ meta, item, returnCount, onClose, onSplit, onMsg }) {
       <p className="muted">Listing cap 0 = excluded from that marketplace ("in-store only"). Reserve holds units back exclusively for that marketplace.</p>
 
       <h3>History</h3>
+      {it.reconciliation && <p style={{ color: it.reconciliation.history_matches ? undefined : 'var(--red)' }}>
+        This row only: signed history total <b>{it.reconciliation.history_net}</b> · Current quantity <b>{it.quantity}</b>
+        {it.reconciliation.history_matches ? ' · Matches.' : ' · Mismatch.'}
+        {' '}A merge transfers quantity between rows; the other row retains its original history.
+      </p>}
       <div className="table-wrap" style={{ maxHeight: 260, overflowY: 'auto' }}>
         <table><thead><tr><th>When</th><th>Type</th><th>Δ</th><th>Cause</th><th>Bin</th><th>Comment</th></tr></thead>
           <tbody>{(it.history || []).map((h) => (

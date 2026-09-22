@@ -8,6 +8,7 @@ const DOCS = [
   ['scanning', 'Scanning'],
   ['staging', 'Staging'],
   ['inventory', 'Inventory'],
+  ['reconciliation', 'Reconciliation & data quality'],
   ['pricing', 'Pricing rules'],
   ['catalog-sync', 'Catalog & price sync'],
   ['exports-imports', 'Exports & imports'],

@@ -52,6 +52,15 @@ def aging(db: Session = Depends(get_db)):
     return report_svc.aging_report(db)
 
 
+@router.get("/reports/reconciliation")
+def reconciliation(db: Session = Depends(get_db)):
+    from ..services.reconciliation import audit
+    # SQLite's legacy transaction mode does not begin a snapshot for SELECTs.
+    # This GET has a fresh session: keep all checks on one consistent snapshot.
+    db.connection().exec_driver_sql("BEGIN")
+    return audit(db)
+
+
 @router.get("/reports/locations")
 def locations(db: Session = Depends(get_db)):
     return report_svc.location_summary(db)

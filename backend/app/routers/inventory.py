@@ -187,6 +187,24 @@ def detail(item_id: int, db: Session = Depends(get_db)):
         "comment": h.comment, "cause": h.cause, "source": h.source,
         "created_at": h.created_at.isoformat() if h.created_at else None,
     } for h in history]
+    pool_items = db.execute(select(InventoryItem).where(
+        InventoryItem.catalog_card_id == item.catalog_card_id,
+        InventoryItem.custom_sku_id == item.custom_sku_id,
+        InventoryItem.condition == item.condition,
+        InventoryItem.printing == item.printing,
+    ).order_by(InventoryItem.id)).scalars().all()
+    pool_quantity = sum(i.quantity for i in pool_items)
+    lot_remaining = sum(a.quantity_remaining for a in lots)
+    history_net = sum(h.quantity_delta for h in history)
+    d["reconciliation"] = {
+        "history_net": history_net, "history_matches": history_net == item.quantity,
+        "pool_quantity": pool_quantity,
+        "pool_active_quantity": sum(i.quantity for i in pool_items if not i.deleted),
+        "lot_remaining": lot_remaining,
+        "difference": lot_remaining - pool_quantity,
+        "pool_rows": [{"id": i.id, "quantity": i.quantity, "deleted": i.deleted}
+                      for i in pool_items],
+    }
     return d
 
 

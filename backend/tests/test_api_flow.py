@@ -125,3 +125,12 @@ def test_bulk_pile_api_flow(client):
     assert d.json()["soft_deleted"] is True
     assert all(p["id"] != pid for p in client.get("/api/bulk/piles").json())
     assert any(o["id"] == sold["id"] for o in client.get("/api/orders").json())
+
+
+def test_reconciliation_endpoint_returns_read_only_checks(client):
+    response = client.get("/api/reports/reconciliation")
+    assert response.status_code == 200
+    data = response.json()
+    assert data["read_only"] is True
+    assert data["summary"]["inventory_rows"] >= 1
+    assert isinstance(data["issues"], list)

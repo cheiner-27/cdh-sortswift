@@ -22,6 +22,12 @@ cd ..
 
 Run tests with `cd backend; python -m pytest tests`.
 
+Read-only inventory reconciliation: **Reports → Reconciliation**, or run
+`python audit_inventory.py --output ../audit-output/inventory.json` from
+`backend`. `diagnose_reconciliation.py` reproduces known workflow defects in
+disposable databases. See `frontend/public/docs/reconciliation.md` for scope
+and current limitations; these checks do not automatically repair history.
+
 ## First-time setup checklist
 
 1. **Catalog** page → sync sets/cards for the games you sell (MTG and Pokémon sync per set; Yu-Gi-Oh! and One Piece sync the whole catalog). Then "Sync prices (TCGcsv)".
