@@ -134,3 +134,17 @@ def test_reconciliation_endpoint_returns_read_only_checks(client):
     assert data["read_only"] is True
     assert data["summary"]["inventory_rows"] >= 1
     assert isinstance(data["issues"], list)
+
+
+def test_pricing_config_rejects_a_bad_free_shipping_guard(client):
+    from app.services import pricing
+    config = pricing.default_config()
+    config["free_shipping_guard"].update(threshold=5.00, min_cross_price=4.00)
+    assert client.put("/api/pricing/config/mtg", json=config).status_code == 400
+    config["free_shipping_guard"].update(min_cross_price=5.75, marketplace="nope")
+    assert client.put("/api/pricing/config/mtg", json=config).status_code == 400
+    config["free_shipping_guard"]["marketplace"] = "tcgplayer"
+    assert client.put("/api/pricing/config/mtg", json=config).status_code == 200
+    saved = client.get("/api/pricing/config/mtg").json()["free_shipping_guard"]
+    assert saved["min_cross_price"] == 5.75
+    client.put("/api/pricing/config/mtg", json=pricing.default_config())

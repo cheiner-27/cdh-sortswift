@@ -18,6 +18,9 @@ export default function PricingPage() {
   const [sim, setSim] = useState(null)
   const [simLargeOnly, setSimLargeOnly] = useState(false)
   const [busy, setBusy] = useState(false)
+  const [settings, setSettings] = useState(null)
+
+  useEffect(() => { api.get('/api/settings').then(setSettings).catch(() => {}) }, [])
 
   useEffect(() => {
     let cancelled = false
@@ -47,6 +50,7 @@ export default function PricingPage() {
     } catch (e) { err(e) } finally { setBusy(false) }
   }
 
+  const setGuard = (fn) => setConfig((c) => { const n = structuredClone(c); fn(n.free_shipping_guard); return n })
   const setTier = (i, fn) => setConfig((c) => { const n = structuredClone(c); fn(n.tiers[i]); return n })
   const addTier = () => setConfig((c) => {
     const n = structuredClone(c)
@@ -110,6 +114,9 @@ export default function PricingPage() {
               <button key={s} className="small" onClick={() => setConfig((c) => ({ ...c, sources: [...c.sources, s] }))}>+ {SOURCE_LABELS[s] || s}</button>))}
           </div>)}
       </div>
+
+      <FreeShippingGuard guard={config.free_shipping_guard} settings={settings}
+        marketplaces={meta.marketplaces} onChange={setGuard} />
 
       {/* --- Tiers --- */}
       {config.tiers.map((tier, i) => (
@@ -278,6 +285,50 @@ export default function PricingPage() {
           </div>
         </div>
       )}
+    </div>
+  )
+}
+
+// Mirrors pricing.free_shipping_band: blanks fall back to the order-intake
+// shipping settings, and the default crossing price is the break-even point.
+function FreeShippingGuard({ guard, settings, marketplaces, onChange }) {
+  const num = (v) => (v === '' ? null : Number(v))
+  const threshold = guard.threshold ?? settings?.slip_free_shipping_over
+  const shipping = settings?.slip_shipping_charged
+  const breakEven = threshold != null && shipping != null
+    ? Math.round((threshold - 0.01 + shipping) * 100) / 100 : null
+  return (
+    <div className="panel">
+      <h3 style={{ marginTop: 0 }}>Free-shipping guard</h3>
+      <p className="muted" style={{ maxWidth: 900 }}>
+        Under the free-shipping line the buyer also pays shipping, so a card just over the line
+        brings in less than one just under it
+        {threshold != null && shipping != null && (
+          <> (a {fmtMoney(threshold - 0.01)} card brings in {fmtMoney(breakEven)}; a{' '}
+            {fmtMoney(threshold)} card brings in {fmtMoney(threshold)})</>)}.
+        With this on, a price that lands between the line and the crossing price is held at{' '}
+        {threshold != null ? fmtMoney(threshold - 0.01) : 'just under the line'} instead. Floors still win.
+      </p>
+      <div className="row center">
+        <label><input type="checkbox" checked={guard.enabled}
+          onChange={(e) => onChange((g) => { g.enabled = e.target.checked })} /> on</label>
+        <Field label="Platform"><select value={guard.marketplace}
+          onChange={(e) => onChange((g) => { g.marketplace = e.target.value })}>
+          {marketplaces.map((m) => <option key={m}>{m}</option>)}</select></Field>
+        <Field label="Free shipping from $">
+          <input style={{ width: 70 }} value={guard.threshold ?? ''}
+            placeholder={settings ? String(settings.slip_free_shipping_over) : ''}
+            onChange={(e) => onChange((g) => { g.threshold = num(e.target.value) })} /></Field>
+        <Field label="Only cross at $ or more">
+          <input style={{ width: 70 }} value={guard.min_cross_price ?? ''}
+            placeholder={breakEven != null ? breakEven.toFixed(2) : ''}
+            onChange={(e) => onChange((g) => { g.min_cross_price = num(e.target.value) })} /></Field>
+        <span className="muted" style={{ fontSize: 12, maxWidth: 360 }}>
+          Blank uses Settings: free shipping from {fmtMoney(settings?.slip_free_shipping_over)},
+          buyer pays {fmtMoney(shipping)} below it. Blank crossing price = break-even
+          {breakEven != null && <> ({fmtMoney(breakEven)})</>}.
+        </span>
+      </div>
     </div>
   )
 }

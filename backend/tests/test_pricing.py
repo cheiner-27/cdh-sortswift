@@ -297,3 +297,66 @@ def test_age_config_validation_rejects_invalid_inputs(db):
         config["tiers"][0]["modifiers"]["age_decay"] = decay
         with pytest.raises(HTTPException):
             put_config("mtg", config, db)
+
+
+# --- free-shipping guard -------------------------------------------------------
+# TCGplayer defaults: free shipping from $5.00, $1.49 flat shipping below it. A
+# $4.99 card brings in $6.48 with shipping, so that's what a card has to reach
+# before going over the line stops losing money.
+
+def priced_at(pct, c=None):
+    """Config whose NM modifier turns the $10 test card into ``pct`` / 10 dollars."""
+    c = c or cfg()
+    c["tiers"][0]["modifiers"]["condition"]["NM"] = pct
+    return c
+
+
+def test_free_shipping_guard_holds_a_card_under_the_line(db, card):
+    item = make_item(db, card)
+    r = pricing.price_item(db, item, "tcgplayer", priced_at(50))  # $5.00
+    assert r["price"] == 4.99
+    assert "held at 4.99" in r["trace"][-1]
+
+
+def test_free_shipping_guard_lets_a_card_cross_at_break_even(db, card):
+    item = make_item(db, card)
+    assert pricing.price_item(db, item, "tcgplayer", priced_at(64.8))["price"] == 6.48
+    assert pricing.price_item(db, item, "tcgplayer", priced_at(64.7))["price"] == 4.99
+    assert pricing.price_item(db, item, "tcgplayer", priced_at(100))["price"] == 10.0
+
+
+def test_free_shipping_guard_only_applies_to_its_platform(db, card):
+    item = make_item(db, card)
+    assert pricing.price_item(db, item, "ebay", priced_at(50))["price"] == 5.00
+
+
+def test_free_shipping_guard_can_be_turned_off(db, card):
+    c = cfg()
+    c["free_shipping_guard"] = {"enabled": False}
+    item = make_item(db, card)
+    assert pricing.price_item(db, item, "tcgplayer", priced_at(50, c))["price"] == 5.00
+
+
+def test_free_shipping_guard_uses_a_custom_crossing_price(db, card):
+    c = cfg()
+    c["free_shipping_guard"] = {"enabled": True, "marketplace": "tcgplayer",
+                                "threshold": 5.00, "min_cross_price": 6.00}
+    item = make_item(db, card)
+    assert pricing.price_item(db, item, "tcgplayer", priced_at(55, c))["price"] == 4.99
+    assert pricing.price_item(db, item, "tcgplayer", priced_at(60, c))["price"] == 6.00
+
+
+def test_free_shipping_guard_follows_the_shipping_settings(db, card):
+    from app.services.settings import set_setting
+    set_setting(db, "slip_shipping_charged", 0.25)  # break-even $5.24
+    db.commit()
+    item = make_item(db, card)
+    assert pricing.price_item(db, item, "tcgplayer", priced_at(52))["price"] == 4.99
+    assert pricing.price_item(db, item, "tcgplayer", priced_at(53))["price"] == 5.30
+
+
+def test_free_shipping_guard_never_breaks_a_floor(db, card):
+    item = make_item(db, card, cost=5.20)
+    r = pricing.price_item(db, item, "tcgplayer", priced_at(50))
+    assert r["price"] == 5.20
+    assert "floor 5.20 keeps" in r["trace"][-1]

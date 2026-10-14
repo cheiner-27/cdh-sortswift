@@ -160,6 +160,10 @@ needs no stock reversal.
 
 From there the order behaves like any other — see *Orders & refunds*.
 
+The **Recent uploads** list shows the last two weeks of uploads, or the 10
+newest when there are fewer than that, 10 to a page. Tick **show all** to page
+back through every upload.
+
 Re-uploading the same PDF is safe. Orders already recorded come back marked
 **duplicate** and are skipped rather than recorded twice, since the slip carries
 TCGplayer's own order number. That means a partly-processed batch can be

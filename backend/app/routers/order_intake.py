@@ -1,10 +1,12 @@
 """Packing-slip order intake: upload, review, commit (Section 8)."""
+from datetime import timedelta
+
 from fastapi import APIRouter, Body, Depends, HTTPException, UploadFile
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from ..db import get_db
-from ..models import SlipBatch, SlipOrder
+from ..models import SlipBatch, SlipOrder, utcnow
 from ..services import order_intake as intake_svc
 from ..services import orders as order_svc
 from ..services.pdf_slips import SlipParseError
@@ -33,11 +35,42 @@ async def upload(file: UploadFile, db: Session = Depends(get_db)):
     return slip_batch_dict(batch, with_orders=True)
 
 
+# The uploads list shows the last two weeks of uploads, but never fewer than
+# the newest few, so a quiet fortnight doesn't leave it empty.
+RECENT_DAYS = 14
+RECENT_MIN = 10
+
+
 @router.get("/batches")
-def batches(db: Session = Depends(get_db)):
+def batches(page: int = 1, page_size: int = 10, show: str = "recent",
+            db: Session = Depends(get_db)):
+    """Uploads, newest first, one page at a time.
+
+    ``show=recent`` (the default) covers uploads from the last ``RECENT_DAYS``
+    days, topped up to the ``RECENT_MIN`` newest when that window is thin.
+    ``show=all`` pages through every upload.
+    """
+    page = max(1, page)
+    page_size = min(max(1, page_size), 100)
+    total_all = db.scalar(select(func.count(SlipBatch.id))) or 0
+    if show == "all":
+        total = total_all
+    else:
+        since = utcnow() - timedelta(days=RECENT_DAYS)
+        in_window = db.scalar(select(func.count(SlipBatch.id)).where(
+            SlipBatch.created_at >= since)) or 0
+        # Newest-first, the window is a prefix of the list, so "the window or
+        # the newest RECENT_MIN, whichever is longer" is just a longer prefix.
+        total = max(in_window, min(RECENT_MIN, total_all))
+    offset = (page - 1) * page_size
+    take = max(0, min(page_size, total - offset))
     rows = db.execute(select(SlipBatch).order_by(
-        SlipBatch.id.desc()).limit(100)).scalars().all()
-    return [slip_batch_dict(b) for b in rows]
+        SlipBatch.created_at.desc().nulls_last(), SlipBatch.id.desc())
+        .offset(offset).limit(take)).scalars().all() if take else []
+    return {"items": [slip_batch_dict(b) for b in rows], "total": total,
+            "total_all": total_all, "page": page, "page_size": page_size,
+            "show": "all" if show == "all" else "recent",
+            "recent_days": RECENT_DAYS}
 
 
 @router.get("/batches/{batch_id}")

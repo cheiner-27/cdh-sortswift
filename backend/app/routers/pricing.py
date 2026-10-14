@@ -4,7 +4,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from ..db import get_db
-from ..domain import GAMES
+from ..domain import GAMES, MARKETPLACES
 from ..models import PricingConfig
 from ..services import pricing as pricing_svc
 from ..services.settings import get_setting
@@ -46,6 +46,18 @@ def put_config(game: str, config: dict = Body(...), db: Session = Depends(get_db
                 raise HTTPException(400, "age steps must have different day thresholds")
             seen.add(step["days"])
     config = pricing_svc._upgrade_config(config)
+    fsg = config["free_shipping_guard"]
+    if not isinstance(fsg["enabled"], bool):
+        raise HTTPException(400, "free_shipping_guard.enabled must be true or false")
+    if fsg["marketplace"] not in MARKETPLACES:
+        raise HTTPException(400, "free_shipping_guard.marketplace is not a known platform")
+    fsg["threshold"] = money(fsg["threshold"], "free-shipping threshold", default=None)
+    fsg["min_cross_price"] = money(fsg["min_cross_price"],
+                                   "free-shipping minimum to cross", default=None)
+    if (fsg["threshold"] is not None and fsg["min_cross_price"] is not None
+            and fsg["min_cross_price"] < fsg["threshold"]):
+        raise HTTPException(400, "the free-shipping minimum to cross can't be below "
+                                 "the free-shipping threshold")
     # tiers must be non-overlapping bands; only the last may be open-ended
     tiers = sorted(config.get("tiers", []), key=lambda t: t.get("min") or 0)
     for a, b in zip(tiers, tiers[1:]):

@@ -32,6 +32,11 @@ document per game (PricingConfig.config):
     }
   ],
 
+  "free_shipping_guard": {        # don't cross the free-shipping line at a loss
+     "enabled": true, "marketplace": "tcgplayer",
+     "threshold": null,            # null = settings.slip_free_shipping_over ($5)
+     "min_cross_price": null},     # null = break-even: $4.99 + $1.49 = $6.48
+
   "set_overrides":  {"MH3": {"suppress": true}},
   "card_overrides": {"123": {"fixed_price": 5.0}}
 }
@@ -39,7 +44,7 @@ document per game (PricingConfig.config):
 Computation order for one item on one platform:
   source (fallback) -> tier (by current price) -> multiplicative modifiers ->
   platform offset -> guards (max-move, tier-lock, floors) -> rounding ->
-  marketplace-imposed minimum.
+  free-shipping guard -> marketplace-imposed minimum.
 
 Fixed prices can be bypassed explicitly with ignore_overrides without deleting
 them. Floors remain authoritative. Both can be set from the Inventory page.
@@ -87,6 +92,10 @@ DEFAULT_CONFIG = {
             "rounding": "0.01",
         }
     ],
+    "free_shipping_guard": {
+        "enabled": True, "marketplace": "tcgplayer",
+        "threshold": None, "min_cross_price": None,
+    },
     "set_overrides": {},
     "card_overrides": {},
 }
@@ -136,9 +145,40 @@ def _upgrade_config(config: dict) -> dict:
         g.setdefault("rarity_floors", {})
         g.setdefault("cost_floor", True)
         tier.setdefault("rounding", "0.01")
+    fsg = config.get("free_shipping_guard")
+    if not isinstance(fsg, dict):
+        fsg = config["free_shipping_guard"] = {}
+    for key, value in DEFAULT_CONFIG["free_shipping_guard"].items():
+        fsg.setdefault(key, value)
     config.setdefault("set_overrides", {})
     config.setdefault("card_overrides", {})
     return config
+
+
+def free_shipping_band(db: Session, config: dict,
+                       marketplace: str) -> tuple[float, float] | None:
+    """The (threshold, min_cross_price) pair of the free-shipping guard, or None
+    when it's off or for another platform.
+
+    Below the threshold the buyer pays flat-rate shipping on top of the card; at
+    or above it shipping is free. So a $4.99 card brings in $4.99 + $1.49 =
+    $6.48 while a $5.00 card brings in $5.00. A price only earns its way over
+    the line once it reaches min_cross_price, which defaults to that break-even
+    point: the most a card under the line can bring in, shipping included.
+    """
+    g = config.get("free_shipping_guard") or {}
+    if not g.get("enabled") or g.get("marketplace", "tcgplayer") != marketplace:
+        return None
+    from .settings import get_setting
+    threshold = g.get("threshold")
+    if threshold is None:
+        threshold = get_setting(db, "slip_free_shipping_over")
+    threshold = float(threshold)
+    min_cross = g.get("min_cross_price")
+    if min_cross is None:
+        min_cross = round(threshold - 0.01
+                          + float(get_setting(db, "slip_shipping_charged")), 2)
+    return threshold, max(float(min_cross), threshold)
 
 
 def _price_rows(db: Session, product_id: int) -> list[PriceData]:
@@ -457,22 +497,45 @@ def price_item(db: Session, item: InventoryItem, marketplace: str,
         price = hi_band
 
     # Floors (authoritative — applied last, before rounding)
+    floor = 0.0  # the highest floor in force, which later guards must respect
     rarity = (item.card.rarity or "").lower() if item.card else ""
     rfloor = guards.get("rarity_floors", {}).get(rarity)
-    if rfloor is not None and price < rfloor:
-        price = rfloor
-        trace.append(f"rarity floor {rfloor:.2f}")
+    if rfloor is not None:
+        floor = max(floor, rfloor)
+        if price < rfloor:
+            price = rfloor
+            trace.append(f"rarity floor {rfloor:.2f}")
     if guards.get("cost_floor"):
         cost = inv_svc.fifo_unit_cost(db, item)
-        if cost is not None and price < cost:
-            price = cost
-            trace.append(f"cost floor {cost:.2f}")
-    if item.price_floor is not None and price < item.price_floor:
-        price = item.price_floor
-        trace.append(f"per-item floor {item.price_floor:.2f}")
+        if cost is not None:
+            floor = max(floor, cost)
+            if price < cost:
+                price = cost
+                trace.append(f"cost floor {cost:.2f}")
+    if item.price_floor is not None:
+        floor = max(floor, item.price_floor)
+        if price < item.price_floor:
+            price = item.price_floor
+            trace.append(f"per-item floor {item.price_floor:.2f}")
 
     price = apply_rounding(price, tier.get("rounding", "0.01"))
     trace.append(f"rounded ({tier.get('rounding', '0.01')}) = {price:.2f}")
+
+    # Free-shipping guard: just over the line earns less than just under it
+    # (the buyer stops paying shipping), so hold the price under the line until
+    # it's high enough to make up the difference. Floors still win.
+    band = free_shipping_band(db, config, marketplace)
+    if band:
+        threshold, min_cross = band
+        below = round(threshold - 0.01, 2)
+        if threshold - 1e-9 <= price < min_cross - 1e-9:
+            if floor > below + 1e-9:
+                trace.append(f"free shipping at {threshold:.2f}: floor "
+                             f"{floor:.2f} keeps {price:.2f}")
+            else:
+                trace.append(f"free shipping at {threshold:.2f}: held at "
+                             f"{below:.2f} (needs {min_cross:.2f} to cross)")
+                price = below
 
     marketplace_price = max(price, mp_min)
     if abs(marketplace_price - price) > 1e-9:

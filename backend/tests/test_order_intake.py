@@ -1,5 +1,5 @@
 """Packing-slip order intake: PDF parsing, fee math, matching, commit."""
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -7,8 +7,8 @@ from fastapi.testclient import TestClient
 
 from app.db import SessionLocal
 from app.main import app
-from app.models import (CatalogCard, InventoryItem, Order, SlipOrder,
-                        collector_number_key, name_key)
+from app.models import (CatalogCard, InventoryItem, Order, SlipBatch,
+                        SlipOrder, collector_number_key, name_key)
 from app.services import order_intake as intake
 from app.services import orders as order_svc
 from app.services import pdf_slips
@@ -771,3 +771,46 @@ def test_api_resolve_rejects_an_out_of_range_line(client):
                     json={})
     assert r.status_code == 400
     client.delete(f"/api/order-intake/batches/{batch['id']}")
+
+
+def test_api_uploads_list_shows_two_weeks_or_the_ten_newest(client):
+    db = SessionLocal()
+    db.query(SlipBatch).delete()
+    now = datetime.now(timezone.utc)
+
+    def add(n, days_ago):
+        for i in range(n):
+            db.add(SlipBatch(filename=f"{days_ago}d-{i}.pdf",
+                             created_at=now - timedelta(days=days_ago, minutes=i)))
+        db.commit()
+
+    def get(**params):
+        return client.get("/api/order-intake/batches", params=params).json()
+
+    try:
+        # A quiet fortnight: only 3 recent, so the list tops up to the 10 newest.
+        add(3, 1)
+        add(20, 30)
+        r = get()
+        assert r["total"] == 10 and r["total_all"] == 23
+        assert len(r["items"]) == 10
+        assert [b["filename"] for b in r["items"][:3]] == [
+            "1d-0.pdf", "1d-1.pdf", "1d-2.pdf"]
+        assert get(page=2)["items"] == []
+
+        # A busy fortnight: everything in the window shows, a page at a time.
+        add(12, 5)
+        r = get()
+        assert r["total"] == 15 and len(r["items"]) == 10
+        r = get(page=2)
+        assert len(r["items"]) == 5
+        assert all(b["filename"].startswith("5d-") for b in r["items"])
+
+        # "all" pages through every upload, oldest last.
+        r = get(show="all", page=4)
+        assert r["total"] == 35 and len(r["items"]) == 5
+        assert r["items"][-1]["filename"] == "30d-19.pdf"
+    finally:
+        db.query(SlipBatch).delete()
+        db.commit()
+        db.close()

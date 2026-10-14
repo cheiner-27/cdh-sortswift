@@ -11,6 +11,7 @@ const MATCH_BADGE = {
 const MATCH_LABEL = { out_of_stock: 'out of stock' }
 
 const fmtDate = (iso) => (iso ? iso.slice(0, 10) : '—')
+const UPLOADS_PAGE_SIZE = 10
 
 // A line's card identity, as read off the slip.
 function lineLabel(l) {
@@ -23,14 +24,25 @@ function lineLabel(l) {
 
 export default function OrderIntakePage() {
   const [msg, ok, err] = useMsg()
-  const [batches, setBatches] = useState([])
+  const [batches, setBatches] = useState(null) // one page of the uploads list
+  const [page, setPage] = useState(1)
+  const [showAll, setShowAll] = useState(false)
   const [batch, setBatch] = useState(null)
   const [busy, setBusy] = useState(false)
   const [resolving, setResolving] = useState(null) // { slip, index }
   const fileRef = useRef(null)
 
-  const loadBatches = () => api.get('/api/order-intake/batches').then(setBatches)
-  useEffect(() => { loadBatches().catch(err) }, [])
+  const loadBatches = (p = page, all = showAll) => api.get(
+    `/api/order-intake/batches?page=${p}&page_size=${UPLOADS_PAGE_SIZE}` +
+    `&show=${all ? 'all' : 'recent'}`).then(setBatches)
+  useEffect(() => { loadBatches(page, showAll).catch(err) }, [page, showAll])
+
+  // A new upload is the newest row, so jump back to the first page to show it.
+  const reloadFirstPage = () => {
+    if (page === 1) return loadBatches(1)
+    setPage(1)
+    return Promise.resolve()
+  }
 
   const openBatch = async (id) => {
     try { setBatch(await api.get(`/api/order-intake/batches/${id}`)) }
@@ -43,7 +55,7 @@ export default function OrderIntakePage() {
     try {
       const b = await api.upload('/api/order-intake/upload', file)
       setBatch(b)
-      await loadBatches()
+      await reloadFirstPage()
       const ready = b.counts.ready || 0
       ok(`Read ${b.order_count} order(s) from ${b.filename} — ${ready} ready, ` +
         `${(b.counts.blocked || 0)} need attention`)
@@ -110,6 +122,13 @@ export default function OrderIntakePage() {
   }
 
   const readyCount = batch ? (batch.counts.ready || 0) : 0
+  const pageCount = batches
+    ? Math.max(1, Math.ceil(batches.total / UPLOADS_PAGE_SIZE)) : 1
+
+  // Discarding the last row on the last page leaves it empty; step back a page.
+  useEffect(() => {
+    if (batches && page > pageCount) setPage(pageCount)
+  }, [batches, page, pageCount])
 
   return (
     <div>
@@ -136,9 +155,22 @@ export default function OrderIntakePage() {
         </div>
       </div>
 
-      {batches.length > 0 && (
+      {batches && batches.total_all > 0 && (
         <div className="panel">
-          <h3>Recent uploads</h3>
+          <div className="row center" style={{ justifyContent: 'space-between' }}>
+            <h3 style={{ margin: 0 }}>{showAll ? 'All uploads' : 'Recent uploads'}</h3>
+            <label className="muted" style={{ fontSize: 12 }}>
+              <input type="checkbox" checked={showAll}
+                onChange={(e) => { setShowAll(e.target.checked); setPage(1) }} />{' '}
+              show all {batches.total_all}
+            </label>
+          </div>
+          {!showAll && (
+            <div className="muted" style={{ fontSize: 12, marginTop: 4 }}>
+              The last {batches.recent_days} days, or the {UPLOADS_PAGE_SIZE} newest
+              if that's fewer.
+            </div>
+          )}
           <div className="table-wrap">
             <table>
               <thead>
@@ -149,7 +181,7 @@ export default function OrderIntakePage() {
                 </tr>
               </thead>
               <tbody>
-                {batches.map((b) => (
+                {batches.items.map((b) => (
                   <tr key={b.id}
                     style={batch && batch.id === b.id
                       ? { outline: '1px solid var(--accent)' } : {}}>
@@ -172,6 +204,18 @@ export default function OrderIntakePage() {
               </tbody>
             </table>
           </div>
+          {pageCount > 1 && (
+            <div className="row center" style={{ marginTop: 8 }}>
+              <button className="small" disabled={page <= 1}
+                onClick={() => setPage(page - 1)}>‹ Newer</button>
+              <span className="muted" style={{ fontSize: 12 }}>
+                Page {page} of {pageCount} · {batches.total} upload
+                {batches.total === 1 ? '' : 's'}
+              </span>
+              <button className="small" disabled={page >= pageCount}
+                onClick={() => setPage(page + 1)}>Older ›</button>
+            </div>
+          )}
         </div>
       )}
 

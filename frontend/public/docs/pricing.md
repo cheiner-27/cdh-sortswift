@@ -60,11 +60,29 @@ TCGplayer).
 `0.49`, `0.95`, `0.99`, or `$1`. (`.49/.95/.99` mean "nearest number ending in
 those cents.")
 
+**Free-shipping guard** (one per game, under the baseline sources) — below the
+free-shipping line the buyer also pays shipping, so a card just over the line
+brings in less than one just under it. With the TCGplayer defaults (free
+shipping from $5.00, $1.49 shipping below that):
+
+- a $4.00 card takes in $4.00 + $1.49 = $5.49
+- a $4.99 card takes in $4.99 + $1.49 = $6.48
+- a $5.00 card takes in $5.00 (shipping is free)
+- a $6.48 card takes in $6.48, the same as $4.99
+
+So with the guard on, a price that lands at or over the line but below the
+**crossing price** is held at $4.99 instead. Leave the crossing price blank to
+use the break-even point ($6.48 here); set it higher to require a margin before
+a card goes over the line. The line and the shipping amount default to the
+*order intake* shipping settings. Floors still win: a card whose cost floor is
+$5.20 stays at $5.20.
+
 ## Order of operations
 
 ```
 source (fallback) → tier (by current price) → modifiers (×) →
 platform offset → guards (max-move → tier-lock → floors) → rounding →
+free-shipping guard →
 platform minimum (e.g. eBay $0.99, applied to the listed price only)
 ```
 
