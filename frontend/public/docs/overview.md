@@ -31,3 +31,16 @@ database.
 
 See the **Glossary** for the meaning of terms like *printing*, *tier*, *reserve*,
 *phash distance*, and *large-move flag*.
+
+## Backups
+
+The database lives only on this computer. Each time `run.ps1` starts or stops
+the app, it zips a copy into Google Drive under **My Drive / SortSwift Backups**
+and keeps the newest 10. If nothing changed since the last copy, it skips it.
+
+- **Needs Google Drive for desktop**, installed and signed in. Without it the
+  launcher prints a warning, skips the backup, and the app still runs.
+- **Another folder:** set the `SORTSWIFT_BACKUP_DIR` environment variable.
+- **To restore:** stop the app, delete any `sortswift.db-wal` and
+  `sortswift.db-shm` files in `backend/data`, then replace
+  `backend/data/sortswift.db` with the `sortswift.db` inside the zip you want.

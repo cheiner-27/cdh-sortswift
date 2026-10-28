@@ -218,8 +218,10 @@ __marimo__/
 .streamlit/secrets.toml
 
 # SortSwift data
-#   Pre-migration snapshots of sortswift.db. The live DB is tracked (LFS) so it
-#   syncs across machines; these are 100MB+ local safety copies and must not be.
+#   The live DB and its snapshots stay on this machine. Git LFS kept a full copy
+#   of every committed version and filled GitHub's storage quota; backups go to
+#   Google Drive instead (backend/backup_db.py).
+backend/data/*.db
 backend/data/*.bak
 audit-output/
 

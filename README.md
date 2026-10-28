@@ -20,6 +20,10 @@ cd ..
 .\run.ps1 -Dev
 ```
 
+The database (`backend/data/sortswift.db`) is not in git. `run.ps1` zips a
+backup into Google Drive (`My Drive/SortSwift Backups`, newest 10 kept) on
+launch and exit; see the Backups section of `frontend/public/docs/overview.md`.
+
 Run tests with `cd backend; python -m pytest tests`.
 
 Inventory reconciliation and reviewed repairs: **Reports → Reconciliation**, or run
