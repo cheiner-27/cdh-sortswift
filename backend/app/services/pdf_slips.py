@@ -66,6 +66,13 @@ def _stream(body: bytes) -> bytes:
     if not m:
         return b''
     raw = m.group(1)
+    # /Length is authoritative. Trimming whitespace before "endstream" can't
+    # tell padding from data, and compressed data ends in a checksum whose last
+    # byte is sometimes a tab or newline; cutting it fails the whole page. The
+    # trim stays only as a fallback for an indirect (``N 0 R``) length.
+    length = re.search(rb'/Length\s+(\d+)(?!\s+\d+\s+R)', body[:m.start()])
+    if length:
+        raw = body[m.start(1):m.start(1) + int(length.group(1))]
     if b'FlateDecode' in body[:m.start()]:
         try:
             return zlib.decompress(raw)

@@ -1,6 +1,7 @@
 """Packing-slip order intake: PDF parsing, fee math, matching, commit."""
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+import zlib
 
 import pytest
 from fastapi.testclient import TestClient
@@ -178,6 +179,18 @@ def test_rejects_a_non_slip_upload():
         pdf_slips.parse_packing_slips(b"just a text file, not a PDF")
     with pytest.raises(pdf_slips.SlipParseError):
         pdf_slips.parse_packing_slips(b"%PDF-1.4\nnothing useful here")
+
+
+def test_stream_ending_in_a_whitespace_byte_is_not_trimmed():
+    """Compressed data ends in a checksum; when its last byte happens to be a
+    tab or newline, the reader must keep it rather than treat it as padding
+    before 'endstream' (a real slip failed to read this way)."""
+    text = next(t for t in (b"BT (Order Number: %d) Tj ET" % i for i in range(10_000))
+                if zlib.compress(t)[-1:].isspace())
+    data = zlib.compress(text)
+    body = (b" << /Length %d /Filter /FlateDecode >> stream\n" % len(data)
+            + data + b"\nendstream ")
+    assert pdf_slips._stream(body) == text
 
 
 # --- fee math ----------------------------------------------------------------
