@@ -193,6 +193,40 @@ def test_stream_ending_in_a_whitespace_byte_is_not_trimmed():
     assert pdf_slips._stream(body) == text
 
 
+# PDFsharp 6 slips (TCGplayer's since 2026-11) differ from older ones in three
+# ways, each of which alone breaks the parse. Real slips carry buyer names and
+# addresses, so these are built from made-up bytes instead of a fixture.
+
+def test_unfinished_deflate_stream_still_reads():
+    """PDFsharp 6 never finishes its deflate streams: no end marker, no
+    checksum."""
+    text = b"BT (Order Number: 1) Tj ET"
+    c = zlib.compressobj()
+    data = c.compress(text) + c.flush(zlib.Z_SYNC_FLUSH)
+    body = (b"<</Length %d/Filter/FlateDecode>>\nstream\n" % len(data)
+            + data + b"\nendstream\n")
+    assert pdf_slips._stream(body) == text
+
+
+def test_indirect_widths_are_indexed_from_first_char():
+    objs = {8: b"<</Type/Font/FirstChar 32/LastChar 34/Widths 19 0 R>>",
+            19: b"[277 278 354]"}
+    widths = pdf_slips._font_widths(objs)[8]
+    assert widths[32:35] == [277, 278, 354]
+
+
+def test_table_columns_come_from_border_lines_when_cells_are_unfilled():
+    edges = (36.375, 93.975, 93.975, 453.975, 453.975, 511.575, 511.575, 576.375)
+    content = (b"BT /F0 10 Tf 44.9 442.72 Td (Quantity) Tj "
+               b"52.85 0 Td (Description) Tj ET\n"
+               + b"".join(b"%g 436.85 m %g 455.1 l S\n" % (x, x) for x in edges))
+    strings, rects = pdf_slips._walk(content)
+    header, cells = pdf_slips._columns(pdf_slips._rows(strings, {}), rects)
+    assert header
+    assert [round(lo) for lo, hi in cells] == [36, 94, 454, 512]
+    assert round(cells[-1][1]) == 576
+
+
 # --- fee math ----------------------------------------------------------------
 
 def test_fee_rounds_each_component_to_the_nearest_cent(db):

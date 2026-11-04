@@ -74,21 +74,40 @@ def _stream(body: bytes) -> bytes:
     if length:
         raw = body[m.start(1):m.start(1) + int(length.group(1))]
     if b'FlateDecode' in body[:m.start()]:
+        # A decompressobj, not zlib.decompress: PDFsharp 6 (TCGplayer's slips
+        # since 2026-11) never finishes its deflate stream, so there's no end
+        # marker or checksum, and zlib.decompress rejects text it has decoded.
         try:
-            return zlib.decompress(raw)
+            return zlib.decompressobj().decompress(raw)
         except zlib.error:
             return b''
     return raw
 
 
 def _font_widths(objs: dict[int, bytes]) -> dict[int, list[float]]:
-    """obj number -> /Widths array, for every font dict that has one."""
+    """obj number -> /Widths array, for every font dict that has one.
+
+    Arrays are padded so index == character code. PDFsharp 6 starts them at
+    /FirstChar 32 and stores them as a separate object (``/Widths 19 0 R``);
+    older slips put them inline from character 0.
+    """
     out = {}
     for num, body in objs.items():
         head = body.split(b'stream')[0]
-        m = re.search(rb'/Widths\s*\[([^\]]*)\]', head)
-        if m and b'/Font' in head:
-            out[num] = [float(x) for x in m.group(1).split()]
+        if b'/Font' not in head:
+            continue
+        m = re.search(rb'/Widths\s*(?:\[([^\]]*)\]|(\d+)\s+0\s+R)', head)
+        if not m:
+            continue
+        arr = m.group(1)
+        if arr is None:
+            ref = re.search(rb'\[([^\]]*)\]', objs.get(int(m.group(2)), b''))
+            if not ref:
+                continue
+            arr = ref.group(1)
+        first = re.search(rb'/FirstChar\s+(\d+)', head)
+        pad = int(first.group(1)) if first else 0
+        out[num] = [0.0] * pad + [float(x) for x in arr.split()]
     return out
 
 
@@ -155,10 +174,13 @@ def _walk(content: bytes) -> tuple[list[dict], list[tuple]]:
 
     Strings carry page-space x/y, effective font size and resource name.
     Rectangles come from ``re`` and give the table's exact column boundaries.
+    Vertical rules (``m`` ... ``l``) are added as zero-width rectangles, for
+    slips that draw cell borders without filling the cells.
     """
     ctm, stack = IDENT, []
     tm = line = IDENT
     size, font = 10.0, None
+    pen = None
     strings, rects, ops = [], [], []
     for tok in _TOKEN.finditer(content):
         t = tok.group(0)
@@ -184,6 +206,13 @@ def _walk(content: bytes) -> tuple[list[dict], list[tuple]]:
             x, y, w, h = nums[-4:]
             p = _mul((1.0, 0.0, 0.0, 1.0, x, y), ctm)
             rects.append((p[4], p[5], w, h))
+        elif t == b'm' and len(nums) >= 2:
+            pen = _mul((1.0, 0.0, 0.0, 1.0, nums[-2], nums[-1]), ctm)[4:]
+        elif t == b'l' and len(nums) >= 2 and pen:
+            x, y = _mul((1.0, 0.0, 0.0, 1.0, nums[-2], nums[-1]), ctm)[4:]
+            if abs(x - pen[0]) < 0.01:
+                rects.append((x, min(y, pen[1]), 0.0, abs(y - pen[1])))
+            pen = (x, y)
         elif t == b'BT':
             tm = line = IDENT
         elif t == b'Tf':
@@ -318,6 +347,14 @@ def _columns(rows: list[dict], rects: list[tuple]) -> tuple[dict | None, list]:
     cells = sorted(((x, x + w) for (x, y, w, h) in rects
                     if abs(y + h / 2 - (header['y'] + 5)) < 12 and 40 < w < 400),
                    key=lambda c: c[0])
+    if len(cells) < 4:
+        # PDFsharp 6 slips leave cells unfilled: the vertical rules crossing
+        # the header row are the column edges. Neighbouring cells each draw
+        # their shared edge, hence the dedupe.
+        mid = header['y'] + 5
+        edges = sorted({round(x, 1) for (x, y, w, h) in rects
+                        if w == 0 and y < mid < y + h})
+        cells = list(zip(edges, edges[1:]))
     return header, cells
 
 
